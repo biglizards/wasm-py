@@ -1,6 +1,6 @@
 import dis
 
-from src.main import func_to_wasm, run_func, Module
+from src.main_old import func_to_wasm, run_func, Module
 from src.run_wasm import run_wasm_function
 
 

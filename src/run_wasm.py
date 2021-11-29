@@ -1,21 +1,75 @@
-from wasmer import engine, Store, Module, Instance
+from wasmer import engine, Store, Module, Instance, Memory, ImportObject, Function
 from wasmer_compiler_cranelift import Compiler
 
 
 def run_wasm(wasm):
-    # Let's define the store, that holds the engine, that holds the compiler.
     store = Store(engine.JIT(Compiler))
-
-    # Let's compile the module to be able to execute it!
     module = Module(store, wasm)
 
+    # the file has some imports we need to fill in
+    # specifically: emscripten_resize_heap, emscripten_memcpy_big, fd_write, and setTempRet0
+    # not all of these seem to be used, but it complains if we don't have them
+    # more may be added as we do more complex things with C
+
+    # I have never seen these 4 be called -- they seem to be vestigial, as the heap grows itself.
+    def emscripten_resize_heap(x: int) -> int:
+        raise RuntimeError('emscripten_resize_heap', x)
+
+    def emscripten_memcpy_big(x: int, y: int, z: int) -> int:
+        raise RuntimeError('emscripten_memcpy_big', x, y, z)
+
+    def emscripten_notify_memory_growth(x: int):
+        raise RuntimeError('emscripten_notify_memory_growth', x)
+
+    def setTempRet0(x: int):
+        raise RuntimeError('setTempRet0', x)
+
+    def fd_write(fd: int, iov: int, iovcnt: int, pnum: int) -> int:
+        # transcribed from emscripten (i have no idea how this works)
+        # reads what i can only assume to be a null-terminated string from memory into a file descriptor
+        # (currently only stdout is supported)
+        if fd != 1:
+            raise NotImplementedError('trying to write to a file other than stdout!')
+
+        i32 = memory.int32_view()
+        u8 = memory.uint8_view()
+
+        num = 0
+        for i in range(iovcnt):
+            ptr = i32[((iov + (i * 8)) >> 2)]
+            len_ = i32[((iov + (i * 8 + 4)) >> 2)]
+            # i would write it as a slice, but the buffers are weird and return an int for slices of size 1
+            string = ''.join(chr(u8[ptr+j]) for j in range(len_))
+            print(string, end='')
+            num += len_
+        i32[pnum >> 2] = num
+        return 0
+
+    def proc_exit(x: int):
+        if x != 0:
+            raise RuntimeError('process exited with non-zero code!')
+
+    import_object = ImportObject()
+    import_object.register(
+        'env', {
+            'emscripten_resize_heap': Function(store, emscripten_resize_heap),
+            'emscripten_memcpy_big': Function(store, emscripten_memcpy_big),
+            'setTempRet0': Function(store, setTempRet0),
+            'emscripten_notify_memory_growth': Function(store, emscripten_notify_memory_growth)
+        }
+    )
+    import_object.register(
+        'wasi_snapshot_preview1', {
+            'fd_write': Function(store, fd_write),
+            'proc_exit': Function(store, proc_exit)
+        }
+    )
+
     # Now the module is compiled, we can instantiate it.
-    instance = Instance(module)
+    instance = Instance(module, import_object)
+    memory: Memory = instance.exports.memory
 
-    # Call the exported `sum` function.
-    result = instance.exports.sum(5, 37)
-
-    return result
+    return instance
 
 
 # noinspection PyArgumentList,PyUnresolvedReferences

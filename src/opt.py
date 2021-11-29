@@ -117,8 +117,8 @@ def to_tree_subset(instructions, start, stack, type_map):
 
 
 def main():
-    import tests.fib
-    to_tree(tests.fib.fib.__code__)
+    import tests.example_files.fib
+    to_tree(tests.example_files.fib.fib.__code__)
 
 
 if __name__ == '__main__':

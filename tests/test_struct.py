@@ -2,7 +2,7 @@ from wasmer import engine, Store, Module as w_Module, Instance
 from wasmer_compiler_cranelift import Compiler
 
 import ws_struct
-from main import Module, Memory, Func
+from main_old import Module, Memory, Func
 
 
 def test_either_can_store_and_access():

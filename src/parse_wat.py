@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import subprocess
+from functools import lru_cache
 from typing import Union
 import string
 from ast import literal_eval
@@ -123,9 +125,10 @@ def tokenize(file):
 
 
 def tree_ify(token_stream) -> Node:
-    # for context: the prior token was a '('
-
+    # to start a module, we read a single '('. In all other cases, we have already read it.
     name = next(token_stream)
+    if name == '(':
+        name = next(token_stream)
 
     children = []
     for token in token_stream:
@@ -146,17 +149,18 @@ class Node:
         self.name: str = name
 
     def __str__(self) -> str:
-        return ' '.join(['(', self.name, *self._body_to_wat(), ')\n'])
+        return ' '.join(['(', self.name, *self._body_to_wat(), ')'])
 
     def __repr__(self):
+        1/0
         return f'{type(self).__name__}({str(self)})'
 
     def _body_to_wat(self) -> list[str]:
         return [
             (
                 str(child)
-                if isinstance(child, Node)
-                else repr(child)
+                # if isinstance(child, Node)
+                # else print(child) or repr(child)
             )
             for child in self.children
         ]
@@ -188,10 +192,30 @@ class Module(Node):
             if isinstance(child, Export) and child.ref_type == 'func':
                 self.funcs_by_name[child.ref_name] = self.get_func_by_index(child.ref_index)
 
+    def add_func(self, func: Func, name: str):
+        self.funcs.append(func)
+        self.funcs_by_name[name] = func
+        # ok this might not work
+        self.children.append(func)
+
     def get_func_by_index(self, i):
         if i < len(self.imports):
             raise IndexError("Index too low")
         return self.funcs[i - len(self.imports)]
+
+    @lru_cache
+    def get_index_by_name(self, name):
+        target = self.funcs_by_name[name]
+        for i, func in enumerate(self.funcs):
+            if func == target:
+                return len(self.imports) + i
+        raise ValueError(f'function {name} not found!')
+
+    def compile(self) -> bytes:
+        process = subprocess.run(['wat2wasm', '-', '-o', '/dev/stdout'], input=str(self).encode(), capture_output=True)
+        if process.returncode != 0:
+            raise RuntimeError(f'Failed to compile {str(self)} {process}')
+        return process.stdout
 
 
 class Type(Node):
@@ -249,7 +273,7 @@ class KeywordLiteral(Node):
         return self.content
 
 
-def parse_based_on_name(name, children):
+def parse_based_on_name(name, children) -> Node:
     mapping = {
         'module': Module,
         'type': Type,
@@ -260,12 +284,12 @@ def parse_based_on_name(name, children):
     return mapping.get(name, Node)(children, name)
 
 
-tokens = tokenize(open('wasm_files/add2.wat', 'r'))
-next(tokens)
-ans = tree_ify(tokens)
+def load(path) -> Module:
+    # probably really bad for memory -- if it starts using too much, we can start caching to disk
+    with open(path, 'rb') as f:
+        process = subprocess.run(['wasm2wat', '-', '-o', '/dev/stdout'], stdin=f, capture_output=True)
+        if process.returncode != 0:
+            raise RuntimeError(f'Failed to decompile {path} {process}')
 
-print(ans)
-
-open('add_out.wat', 'w').write(str(ans))
-
-print("done")
+    stream = io.StringIO(process.stdout.decode())
+    return tree_ify(token_stream=tokenize(file=stream))
