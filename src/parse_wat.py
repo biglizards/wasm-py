@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import re
 import subprocess
 from functools import lru_cache
 from typing import Union
@@ -8,9 +9,26 @@ import string
 from ast import literal_eval
 
 
+pattern = re.compile(r'0x(\d*)\.?([pP])?([+\-])?(\d*)?')
+
+
 def numeric_literal(token) -> Union[int, float]:
-    # note that this is not complete: it doesn't work for hex literals (but we shouldn't see any)
-    return literal_eval(''.join(token))
+    token = ''.join(token)
+
+    if token.startswith('0x'):
+
+        # in case this breaks: treat it as an opaque string instead
+        p, is_float, sign, e = pattern.match(token).groups()
+        if is_float:
+            return int(p, 16) * (2 ** numeric_literal(f'{sign}{e}'))
+        else:
+            return int(p, 16)
+        # ok we don't really know if it's a float or an int
+        # they both start with '0x' and then a hexnum
+
+    else:
+        # note that this is not complete: it doesn't work for hex literals (but we shouldn't see any)
+        return literal_eval(token)
 
 
 def keyword_literal(token):
@@ -152,7 +170,7 @@ class Node:
         return ' '.join(['(', self.name, *self._body_to_wat(), ')'])
 
     def __repr__(self):
-        1/0
+        # 1/0
         return f'{type(self).__name__}({str(self)})'
 
     def _body_to_wat(self) -> list[str]:
@@ -176,21 +194,27 @@ class Module(Node):
         self.imports = []
         self.funcs = []
         self.exports = []
+        self.globals = []
         self.misc_nodes = []
         self.funcs_by_name: dict[str, Node] = {}
+        self.global_index_by_name: dict[str, int] = {}
 
         mapping = {
             Type: self.types,
             Import: self.imports,
             Func: self.funcs,
             Export: self.exports,
+            Global: self.globals,
         }
 
         for child in children:
             mapping.get(type(child), self.misc_nodes).append(child)
 
-            if isinstance(child, Export) and child.ref_type == 'func':
-                self.funcs_by_name[child.ref_name] = self.get_func_by_index(child.ref_index)
+            if isinstance(child, Export):
+                if child.ref_type == 'func':
+                    self.funcs_by_name[child.ref_name] = self.get_func_by_index(child.ref_index)
+                elif child.ref_type == 'global':
+                    self.global_index_by_name[child.ref_name] = child.ref_index
 
     def add_func(self, func: Func, name: str):
         self.funcs.append(func)
@@ -199,6 +223,7 @@ class Module(Node):
         self.children.append(func)
 
     def get_func_by_index(self, i):
+        # technically we can import globals, but I don't see this happening
         if i < len(self.imports):
             raise IndexError("Index too low")
         return self.funcs[i - len(self.imports)]
@@ -212,9 +237,10 @@ class Module(Node):
         raise ValueError(f'function {name} not found!')
 
     def compile(self) -> bytes:
+        open("holyshitwhattheeverlovingfuck.wat", 'w').write(str(self))
         process = subprocess.run(['wat2wasm', '-', '-o', '/dev/stdout'], input=str(self).encode(), capture_output=True)
         if process.returncode != 0:
-            raise RuntimeError(f'Failed to compile {str(self)} {process}')
+            raise RuntimeError(f'Failed to compile:\n {process.stderr.decode()}')
         return process.stdout
 
 
@@ -228,6 +254,10 @@ class Import(Node):
 
 class Func(Node):
     name = 'func'
+
+
+class Global(Node):
+    name = 'global'
 
 
 class Export(Node):
@@ -254,12 +284,24 @@ class StringLiteral(Node):
         # the repr for python strings gets it most of the way there, but writes NULL as \x00 instead of \00
         # and uses ' instead of "
         # and doesn't escape all non-ascii characters (only non-printable ones)
-        almost_str = (
-            repr(self.content)
-                .encode('ascii', 'backslashreplace').decode()
-                .replace('\\x', '\\').replace('"', '\\"')
-                .strip("'")
+        def fmt(c):
+            # note: this is NOT string.printable -- it's missing ", \, and control chars
+            if c in '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!#$%%&\'()*+,-./:;<=>?@[]^_`{|}~ ':
+                return c
+            else:
+                return f'\\{hex(ord(c))[2:].zfill(2)}'
+
+        almost_str = ''.join(
+            fmt(c) for c in self.content
         )
+
+        # almost_str = (
+        #     repr(self.content)
+        #         .encode('ascii', 'backslashreplace').decode()
+        #         .replace('\\x', '\\').replace('"', '\\"')
+        #         .strip("'")
+        # )
+
         a2 = ['"', almost_str, '"']
         return ''.join(a2)
 
@@ -273,6 +315,10 @@ class KeywordLiteral(Node):
         return self.content
 
 
+class FloatLiteral(Node):
+    name = 'float'
+
+
 def parse_based_on_name(name, children) -> Node:
     mapping = {
         'module': Module,
@@ -280,6 +326,7 @@ def parse_based_on_name(name, children) -> Node:
         'import': Import,
         'func': Func,
         'export': Export,
+        'global': Global,
     }
     return mapping.get(name, Node)(children, name)
 

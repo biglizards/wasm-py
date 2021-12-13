@@ -44,11 +44,10 @@ def make_instance(path='build/emcc/add2.wasm'):
         return 0
 
     def fd_close(x: int) -> int:
-        return 0
+        raise RuntimeError('fd_close called!', x)
 
     def fd_seek(x: int, y: int, z: int, a: int) -> int:
-        raise RuntimeError("fd_seek called!")
-        return 0
+        raise RuntimeError('fd_seek called!', x, y, z, a)
 
     def setTempRet0(x: int):
         print('setTempRet0', x)
@@ -107,6 +106,12 @@ def main():
     assert i.exports.main5(12) == 233
     assert i.exports.main5(13) == 377
     assert i.exports.main5(23) == 46368
+
+    # ok this is a bit silly but lets go for it
+    pair = i.exports.pair(5, 27)
+    assert i.exports.first(pair) == 5
+    assert i.exports.second(pair) == 27
+
 
     # assert i.exports.main5(23) == 46368, i.exports.fib(23)
 
