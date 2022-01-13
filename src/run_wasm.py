@@ -2,18 +2,22 @@ import sys
 
 from wasmer import engine, Store, Module, Instance, Memory, ImportObject, Function, FunctionType, Type
 from wasmer_compiler_cranelift import Compiler
+from wasmer_compiler_singlepass import Compiler as C2
 
 # from generate_code import CodeGenerator
 
 
 def run_wasm(wasm):
-    store = Store(engine.JIT(Compiler))
+    e = engine.JIT(Compiler)
+    store = Store(e)
     module = Module(store, wasm)
 
     # the file has some imports we need to fill in
     # specifically: emscripten_resize_heap, emscripten_memcpy_big, fd_write, and setTempRet0
     # not all of these seem to be used, but it complains if we don't have them
     # more may be added as we do more complex things with C
+    # fun fact: most of these have been removed now, due to being totally useless.
+    # but i'll keep them around for legacy compatablity for a while
 
     # I have never seen these 4 be called -- they seem to be vestigial, as the heap grows itself.
     def emscripten_resize_heap(x: int) -> int:

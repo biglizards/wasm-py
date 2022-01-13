@@ -2,7 +2,7 @@ import dis
 
 from generate_code import CodeGenerator
 # from src.main_old import func_to_wasm, run_func, Module
-from main import compile_func_to_wasm
+from main import compile_func_to_wasm, compile_and_save, compile_multiple
 
 
 def test_lambda_add():
@@ -49,7 +49,7 @@ def test_undefined_operation():
 
 
 def test_simple_flow():
-    @compile_func_to_wasm
+    @compile_and_save
     def is_three(x):
         if x == 3:
             return 1
@@ -61,53 +61,64 @@ def test_simple_flow():
 
 
 def test_while_loop():
-    @compile_func_to_wasm
+    @compile_and_save
     def efficient_fib(n):
-        a, b = 0, 1
-        while n:
-            a, b = b, a + b
-            n -= 1
+        # a, b = 0, 1
+        a = 0
+        b = 1
+        while n != 0:
+            # a, b = b, a + b
+            tmp = a
+            a = b
+            b = b + tmp
+            n = n - 1  # n -= 1
         return a
 
+    assert efficient_fib(1) == 1
+    assert efficient_fib(5) == 5
+    assert efficient_fib(10) == 55
     assert efficient_fib(35) == 9227465
 
 
 def test_nested_function():
+    @compile_func_to_wasm
     def add(x, y):
         def inner_add(a, b):
             return a+b
         return inner_add(x, y)
 
-    func = compile_func_to_wasm(add)
-    assert func(3, 33) == 36
+    assert add(3, 33) == 36
 
 
-# def test_two_functions():
-#     def add_one(x):
-#         return x+1
-#
-#     def add(x, y):
-#         return add_one(x) + add_one(y)
-#
-#     print("add 1")
-#     dis.dis(add_one)
-#     print("add")
-#     dis.dis(add)
-#
-#     # ok this just straight up does not work
-#
-#     func_1 = func_to_wasm(
-#         code=add_one.__code__,
-#         name='add_one'
-#     )
-#     func_2 = func_to_wasm(
-#         code=add.__code__,
-#         name='add'
-#     )
-#
-#     mod = Module(func_1, func_2)
-#     wasm = mod.compile()
-#     assert run_wasm_function(wasm, 'add', 3, 33) == 38
+def test_two_functions():
+    from example_files.example import add_one, add
+
+    add_one, add = compile_multiple(add_one, add)
+
+    assert add_one(3) == 4
+
+    assert add(3, 33) == 38
+    assert add(1, 1) == 4
+
+
+def test_fib():
+    from example_files.fib import fib_python
+    fib = compile_func_to_wasm(fib_python, save=True)
+    assert fib(35) == 9227465
+    bench(fib, 25, n=100)
+
+
+def bench(f, arg, n=10000):
+    import time
+    t1 = time.time()
+    for _ in range(n):
+        pass
+    t_base = time.time() - t1
+    t2 = time.time()
+    for _ in range(n):
+        f(arg)
+    t = time.time() - t2
+    print(f'took: {t * 1000:03f}ms')
 
 
 if __name__ == '__main__':
@@ -115,5 +126,9 @@ if __name__ == '__main__':
     # test_func_add()
     # test_pair_swap()
     # test_undefined_operation()
-    test_simple_flow()
+    # test_simple_flow()
+    # test_while_loop()
+    # test_two_functions()
+    test_fib()
 
+import opcode

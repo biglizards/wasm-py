@@ -1,4 +1,4 @@
-def fib(n: int):
-    if n <= 1:
+def fib_python(n: int):
+    if n <= 2:
         return 1
-    return fib(n - 1) + fib(n - 2)
+    return fib_python(n - 1) + fib_python(n - 2)

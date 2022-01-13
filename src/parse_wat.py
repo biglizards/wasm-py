@@ -8,7 +8,6 @@ from typing import Union
 import string
 from ast import literal_eval
 
-
 pattern = re.compile(r'0x(\d*)\.?([pP])?([+\-])?(\d*)?')
 
 
@@ -198,6 +197,9 @@ class Module(Node):
         self.misc_nodes = []
         self.funcs_by_name: dict[str, Node] = {}
         self.global_index_by_name: dict[str, int] = {}
+        self.table = []
+        self.elems = []
+        self.table_indices_by_name: dict[str, int] = {}
 
         mapping = {
             Type: self.types,
@@ -205,6 +207,8 @@ class Module(Node):
             Func: self.funcs,
             Export: self.exports,
             Global: self.globals,
+            Table: self.table,
+            Elem: self.elems,
         }
 
         for child in children:
@@ -216,9 +220,14 @@ class Module(Node):
                 elif child.ref_type == 'global':
                     self.global_index_by_name[child.ref_name] = child.ref_index
 
+        assert len(self.table) == 1
+
+        self.tmp_register = self.add_func_to_table('__internal__tmp_register', 0)
+
     def add_func(self, func: Func, name: str):
         self.funcs.append(func)
         self.funcs_by_name[name] = func
+        self.add_func_to_table(name, func_id=self.get_func_index_by_name(name))
         # ok this might not work
         self.children.append(func)
 
@@ -229,18 +238,72 @@ class Module(Node):
         return self.funcs[i - len(self.imports)]
 
     @lru_cache
-    def get_index_by_name(self, name):
+    def get_func_index_by_name(self, name):
         target = self.funcs_by_name[name]
         for i, func in enumerate(self.funcs):
             if func == target:
                 return len(self.imports) + i
         raise ValueError(f'function {name} not found!')
 
-    def compile(self) -> bytes:
-        open("holyshitwhattheeverlovingfuck.wat", 'w').write(str(self))
-        process = subprocess.run(['wat2wasm', '-', '-o', '/dev/stdout'], input=str(self).encode(), capture_output=True)
+    def increase_table_size(self):
+        # the first is the min size, second is max. Second is optional, but seems to be included by the compiler
+        self.table[0].children[0] += 1
+        if isinstance(self.table[0].children[1], int):
+            self.table[0].children[1] += 1
+
+        # return the number of items in the table (probably?)
+        return self.table[0].children[0]
+
+    def add_elem(self, func_id, offset):
+        elem = Elem([
+            Node(
+                name='i32.const',
+                children=[offset],
+            ),
+            KeywordLiteral('func'),
+            func_id
+            ],
+            name='elem'
+        )
+        self.elems.append(elem)
+        self.children.append(elem)
+
+    def add_func_to_table(self, name, func_id):
+        if name not in self.table_indices_by_name:
+            offset = self.increase_table_size() - 1
+            self.add_elem(func_id, offset)
+            self.table_indices_by_name[name] = offset
+            return offset
+        else:
+            print(f'tried to add func {name} {func_id} to table twice!')
+
+    def get_table_entry_by_name(self, name):
+        class LazyEntry:
+            def __str__(_self):
+                return str(self.table_indices_by_name[name])
+        return LazyEntry()
+
+    def compile(self, save_name=None, opt=True) -> bytes:
+        process = subprocess.run(['wat2wasm', '--enable-reference-types', '-', '-o', '/dev/stdout'], input=str(self).encode(), capture_output=True)
         if process.returncode != 0:
             raise RuntimeError(f'Failed to compile:\n {process.stderr.decode()}')
+
+        if save_name:
+            open(f'tmp/{save_name}.wasm', 'wb').write(process.stdout)
+
+        if opt:
+            return self.opt_wasm(process.stdout, save_name)
+        else:
+            return process.stdout
+
+    @staticmethod
+    def opt_wasm(wasm: bytes, save_name=None) -> bytes:
+        process = subprocess.run(['wasm-opt', '--enable-multivalue', '--enable-reference-types', '-', '-O4', '-o', '/dev/stdout'],
+                                 input=wasm, capture_output=True)
+        if process.returncode != 0:
+            raise RuntimeError(f'Failed to optimise:\n {process.stderr.decode()}')
+        if save_name:
+            open(f'tmp/{save_name}_opt.wasm', 'wb').write(process.stdout)
         return process.stdout
 
 
@@ -258,6 +321,14 @@ class Func(Node):
 
 class Global(Node):
     name = 'global'
+
+
+class Table(Node):
+    name = 'table'
+
+
+class Elem(Node):
+    name = 'elem'
 
 
 class Export(Node):
@@ -307,12 +378,12 @@ class StringLiteral(Node):
 
 
 class KeywordLiteral(Node):
-    def __init__(self, content):
+    def __init__(self, *content):
         super().__init__(children=[], name=None)
         self.content = content
 
     def __str__(self):
-        return self.content
+        return ' '.join(str(c) for c in self.content)
 
 
 class FloatLiteral(Node):
@@ -327,6 +398,8 @@ def parse_based_on_name(name, children) -> Node:
         'func': Func,
         'export': Export,
         'global': Global,
+        'table': Table,
+        'elem': Elem,
     }
     return mapping.get(name, Node)(children, name)
 
