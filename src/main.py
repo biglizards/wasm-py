@@ -16,7 +16,7 @@ def compile_func_to_wasm(func, name=None, save=False):
 
     save_name = name if save else None
 
-    wasm = g.module.compile(save_name=save_name)
+    wasm = g.compile(save_name=save_name)
     instance = run_wasm(wasm)
 
     return getattr(instance.exports, f'__{name}_wrapper')
@@ -28,7 +28,7 @@ def compile_multiple(*funcs):
     for func in funcs:
         g.add_to_module(func.__code__, func.__name__)
 
-    wasm = g.module.compile(save_name=funcs[0].__name__)
+    wasm = g.compile(save_name=funcs[0].__name__)
     instance = run_wasm(wasm)
 
     return [

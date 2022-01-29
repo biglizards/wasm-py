@@ -6,6 +6,9 @@ from functools import lru_cache
 from wasmer import engine, Store, Module, Instance, ImportObject, Function, Memory, FunctionType, Type
 from wasmer_compiler_cranelift import Compiler
 
+from generate_code import CodeGenerator
+from run_wasm import run_wasm
+
 
 def make_instance(path='build/emcc/add2.wasm'):
     store = Store(engine.JIT(Compiler))
@@ -86,7 +89,10 @@ def make_instance(path='build/emcc/add2.wasm'):
 
 
 def main():
-    i = make_instance()
+    g = CodeGenerator()
+    wasm = g.wasm_module.compile()
+    i = run_wasm(wasm)
+
     assert i.exports.fib(1) == 1
     assert i.exports.fib(2) == 2
     assert i.exports.fib(3) == 3

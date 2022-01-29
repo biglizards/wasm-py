@@ -227,7 +227,6 @@ class Module(Node):
     def add_func(self, func: Func, name: str):
         self.funcs.append(func)
         self.funcs_by_name[name] = func
-        self.add_func_to_table(name, func_id=self.get_func_index_by_name(name))
         # ok this might not work
         self.children.append(func)
 
@@ -262,34 +261,54 @@ class Module(Node):
             ),
             KeywordLiteral('func'),
             func_id
-            ],
+        ],
             name='elem'
         )
         self.elems.append(elem)
         self.children.append(elem)
 
-    def add_func_to_table(self, name, func_id):
+    def add_func_to_table(self, name, func_id=None):
+        if func_id is None:
+            func_id = self.get_func_index_by_name(name)
+
         if name not in self.table_indices_by_name:
             offset = self.increase_table_size() - 1
             self.add_elem(func_id, offset)
             self.table_indices_by_name[name] = offset
             return offset
         else:
-            print(f'tried to add func {name} {func_id} to table twice!')
+            print(f'warning: tried to add func {name} {func_id} to table twice!')
 
     def get_table_entry_by_name(self, name):
         class LazyEntry:
             def __str__(_self):
                 return str(self.table_indices_by_name[name])
+
         return LazyEntry()
 
     def compile(self, save_name=None, opt=True) -> bytes:
-        process = subprocess.run(['wat2wasm', '--enable-reference-types', '-', '-o', '/dev/stdout'], input=str(self).encode(), capture_output=True)
+        # awful hack to fix table size problems -- will be fixed soon
+        print("todo remove this")
+        str(self)
+        thing = str(self)
+        enc = thing.encode()
+
+        if save_name:
+            open(f'tmp/{save_name}.raw.wat', 'wb').write(enc)
+
+        process = subprocess.run(
+            ['wat2wasm', '--enable-reference-types', '-', '-o', '/dev/stdout'],
+            input=enc,
+            capture_output=True
+        )
         if process.returncode != 0:
             raise RuntimeError(f'Failed to compile:\n {process.stderr.decode()}')
 
         if save_name:
             open(f'tmp/{save_name}.wasm', 'wb').write(process.stdout)
+            subprocess.run(
+                ['wasm2wat', '--enable-reference-types', f'tmp/{save_name}.wasm', '-o', f'tmp/{save_name}.wat'],
+            )
 
         if opt:
             return self.opt_wasm(process.stdout, save_name)
@@ -298,12 +317,17 @@ class Module(Node):
 
     @staticmethod
     def opt_wasm(wasm: bytes, save_name=None) -> bytes:
-        process = subprocess.run(['wasm-opt', '--enable-multivalue', '--enable-reference-types', '-', '-O4', '-o', '/dev/stdout'],
-                                 input=wasm, capture_output=True)
+        process = subprocess.run(
+            ['wasm-opt', '--enable-multivalue', '--enable-reference-types', '-', '-O4', '-o', '/dev/stdout'],
+            input=wasm, capture_output=True)
         if process.returncode != 0:
             raise RuntimeError(f'Failed to optimise:\n {process.stderr.decode()}')
         if save_name:
             open(f'tmp/{save_name}_opt.wasm', 'wb').write(process.stdout)
+            subprocess.run(
+                ['wasm2wat', '--enable-reference-types', f'tmp/{save_name}_opt.wasm', '-o', f'tmp/{save_name}_opt.wat'],
+            )
+
         return process.stdout
 
 

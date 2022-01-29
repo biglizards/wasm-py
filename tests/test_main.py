@@ -56,8 +56,15 @@ def test_simple_flow():
         else:
             return 0
 
+    @compile_func_to_wasm
+    def is_five(x):
+        return 1 if x == 5 else 0
+
     assert is_three(3)
     assert not is_three(2)
+
+    assert is_five(5)
+    assert not is_five(3)
 
 
 def test_while_loop():
@@ -108,6 +115,16 @@ def test_fib():
     bench(fib, 25, n=100)
 
 
+def test_ambiguous_function_pointer():
+    from example_files.function_swap import foo, add_1, add_10
+    foo, *_ = compile_multiple(foo, add_1, add_10)
+
+    assert foo(3, 1) == 5
+    assert foo(4, 1) == 6
+    assert foo(3, 2) == 14
+    assert foo(4, 2) == 15
+
+
 def bench(f, arg, n=10000):
     import time
     t1 = time.time()
@@ -122,13 +139,14 @@ def bench(f, arg, n=10000):
 
 
 if __name__ == '__main__':
-    # test_lambda_add()
-    # test_func_add()
-    # test_pair_swap()
-    # test_undefined_operation()
-    # test_simple_flow()
-    # test_while_loop()
-    # test_two_functions()
+    test_lambda_add()
+    test_func_add()
+    test_pair_swap()
+    test_undefined_operation()  # we expect this one to output some error messages
+    test_simple_flow()
+    test_while_loop()
+    test_two_functions()
     test_fib()
+    test_ambiguous_function_pointer()
 
 import opcode
