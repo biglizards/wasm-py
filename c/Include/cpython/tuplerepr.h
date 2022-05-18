@@ -27,6 +27,6 @@ typedef struct {
 
 
 PyAPI_FUNC(PyTupleObject*) PyTuple_set_item_unchecked(PyObject* v, PyTupleObject* op, Py_ssize_t i);
-PyAPI_FUNC(void) debug_print();
+PyAPI_FUNC(void) debug_print(void*);
 
 //PyAPI_FUNC(void) _PyTuple_DebugMallocStats(FILE *out);

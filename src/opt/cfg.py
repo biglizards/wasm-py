@@ -1,151 +1,28 @@
 from __future__ import annotations
 
 import dis
-import functools
 import heapq
 import pprint
-from collections import deque, defaultdict
+from collections import defaultdict
 
-
-class Var:
-    def __init__(self, value=None, instruction=None):
-        self.value = value
-        self.scope = {
-            'LOAD_CONST': 'const',
-            'LOAD_FAST': 'local',
-            'LOAD_GLOBAL': 'global',
-        }.get(getattr(instruction, 'opname', None))
-        self.pushed_by = instruction
-
-    def __repr__(self):
-        if self.value:
-            return f'Var({repr(self.value)})'
-        else:
-            return f'Var()'
-
-
-class Int(Var):
-    def __repr__(self):
-        if self.value is not None:
-            return f'Short({repr(self.value)})'
-        return f'Short()'
-
-
-class Bool(Var):
-    def __repr__(self):
-        return f'Bool()'
-
-
-class Function(Var):
-    @staticmethod
-    def factory(arg_count, arg_types=None, return_type=None):
-        return functools.partial(Function, arg_count, arg_types, return_type)
-
-    def __init__(self, arg_count, arg_types=None, return_type=None, value=None, instruction=None):
-        super().__init__(value, instruction)
-        self.arg_count = arg_count
-        self.arg_types = arg_types
-        self.return_type = return_type
-
-    def __repr__(self):
-        if self.arg_types and self.return_type:
-            return f'({repr(self.arg_types)} => {repr(self.return_type)})'
-        return f'Function({self.arg_count}, {repr(self.arg_types)}, {repr(self.return_type)})'
-
-
-def mutate_stack(stack, instruction, type_map):
-    if instruction.opname in ['LOAD_FAST', 'LOAD_CONST', 'LOAD_GLOBAL']:
-        if isinstance(instruction.argval, int):
-            stack.append(Int(instruction.argval, instruction))
-        else:
-            if instruction.argval in type_map:
-                stack.append(
-                    type_map[instruction.argval](
-                        value=instruction.argval,
-                        instruction=instruction,
-                    )
-                )
-            else:
-                stack.append(Var(instruction.argval, instruction=instruction))
-    elif instruction.opname in ['POP_JUMP_IF_FALSE']:
-        stack.pop()
-    elif instruction.opname in ['COMPARE_OP']:
-        stack.pop()
-        stack.pop()
-        stack.append(Bool())  # strictly, rich comparisons allow for non-bool return types
-    elif instruction.opname in ['BINARY_SUBTRACT', 'BINARY_ADD']:
-        a = stack.pop()
-        b = stack.pop()
-        if isinstance(a, Int) and isinstance(b, Int):
-            stack.append(Int())
-        else:
-            stack.append(Var())
-    elif instruction.opname in ['RETURN_VALUE']:
-        assert len(stack) == 1
-    elif instruction.opname in ['CALL_FUNCTION']:
-        assert len(stack) >= 1 + instruction.arg
-        args = [stack.pop() for _ in range(instruction.arg)]
-        function: Var = stack.pop()
-
-        # see calling_functions entries 3/4 for more detail
-
-        # assert: since function is on the stack, we must not have branched
-        # in such a way that two different functions could be called
-        assert not hasattr(function.pushed_by, 'delay')
-        assert not hasattr(instruction, 'func_push_instruction')
-
-        function.pushed_by.delay = True
-        instruction.func_push_instruction = function.pushed_by
-
-        if (isinstance(function, Function)
-                and function.arg_types and function.return_type
-                and all(
-                    type(arg) is type(arg_type)
-                    for arg, arg_type in zip(args, function.arg_types))):
-            stack.append(function.return_type)
-        elif isinstance(function, Var):
-            # maybe we can figure out
-            stack.append(Var(instruction=instruction))
-        else:
-            stack.append(Var())
-    else:
-        raise ValueError(f'unexpected opcode: {instruction}')
-
-
-jumps = [
-    'JUMP_FORWARD',
-    'POP_JUMP_IF_TRUE',
-    'POP_JUMP_IF_FALSE',
-    'JUMP_IF_NOT_EXC_MATCH',
-    'JUMP_IF_TRUE_OR_POP',
-    'JUMP_IF_FALSE_OR_POP',
-    'JUMP_ABSOLUTE',
-]
-
-abs_jumps = [
-    'JUMP_FORWARD',
-    'JUMP_ABSOLUTE'
-]
+from opt.analyse import Analyzer
+from opt.main import InstructionList, jumps, abs_jumps
 
 
 # We need to split code into blocks based on where jumps start and end
 # we also want to know, for each jump target: where is the first and last place it's jumped to
 
 
-def new_cfg(code) -> ControlFlowGraph:
-    il = InstructionList(list(dis.Bytecode(code)))
+def new_cfg(func) -> ControlFlowGraph:
+    il = InstructionList(list(dis.Bytecode(func)))
     return ControlFlowGraph.new(il)
 
 
-class InstructionList:
-    def __init__(self, instructions: list[dis.Instruction]):
-        self.instructions = instructions
-        self.indices = {
-            x.offset: i for i, x in enumerate(self.instructions)
-        }
-        self.indices_inv = {
-            i: x.offset for i, x in enumerate(self.instructions)
-        }
+def big_intersection(iterator) -> set:
+    total = next(iterator)
+    for item in iterator:
+        total = total.intersection(item)
+    return total
 
 
 class ControlFlowGraph:
@@ -155,6 +32,9 @@ class ControlFlowGraph:
             self.inward_edges = []
             self.outwards_edges = []
             self.offset: int = -1  # guaranteed to be valid after CFG is init
+
+            self.parents: list[ControlFlowGraph.Block] = []
+            self.children: list[ControlFlowGraph.Block] = []
 
         def add(self, i: dis.Instruction):
             self.instructions.append(i)
@@ -169,14 +49,13 @@ class ControlFlowGraph:
             self.blocks = blocks
             self.offset = self.blocks[0].offset
 
-    def __init__(self, blocks: dict[int, Block], instructions: InstructionList):
-        self.blocks = blocks
+    def __init__(self, blocks: dict[int, ControlFlowGraph.Block], instructions: InstructionList):
+        self.blocks: dict[int, ControlFlowGraph.Block] = blocks
         self.instructions = instructions
+        self.analyzer = Analyzer()
 
         self.offset_to_index = {instruction.offset: i for i, instruction in enumerate(self.instructions.instructions)}
         self.index_to_offset = {i: instruction.offset for i, instruction in enumerate(self.instructions.instructions)}
-
-        to_tree(self.instructions)
 
     def __repr__(self):
         return f'<ControlFlowGraph({self.blocks})>'
@@ -240,9 +119,28 @@ class ControlFlowGraph:
             a = a.blocks[0]
         return a.offset
 
+    def compute_dominance(self, root):
+        # taken from wikipedia, todo who really came up with it
+        # theoretically quadratic, practically linear
+        dom = {node: set(self.blocks.keys()) for node in self.blocks.keys()}
+        dom[root] = {root}
+
+        flag = True
+        while flag:
+            flag = False
+            for node in self.blocks.values():
+                if node.offset is root:
+                    continue
+                new_dom = big_intersection(dom[p] for p in node.inward_edges).union({node.offset})
+                if new_dom != dom[node.offset]:
+                    flag = True
+                    dom[node.offset] = new_dom
+
+        return dom
+
     def order_blocks(self, root=None) -> tuple[list[Block], list[Loop]]:
         # generate a topological ordering (considering only the forward edges)
-        # this means we must put all of a blocks parents in before that block
+        # this means we must put all of a block's parents in before that block
         # additionally, we don't break up loops
 
         # lemma: other than loops, sorting by offset gives a topological order
@@ -251,6 +149,8 @@ class ControlFlowGraph:
         # iterate over all nodes in a mostly breadth-first way
         if root is None:
             root = self.blocks[0]
+
+        dom = self.compute_dominance(root.offset)
 
         order = []
 
@@ -274,37 +174,34 @@ class ControlFlowGraph:
                         visited.add(child)
                 continue
 
-            # root is a loop header
+            # node is a loop header
 
-            # now we figure out which side the loop is on
-            # we do this by working backwards from the end, in a depth-first way, on forwards edges
-            # because forwards edges form a DAG, we never get stuck
+            # the loop body is every node that the header dominates
+            dominated_nodes2 = {n for (n, dom_by) in dom.items() if node.offset in dom_by}
+            dominated_nodes = {node.offset}
 
-            node_ = self.blocks[loop_end]
-            while node_ is not node and node_.offset not in node.outwards_edges:
-                for parent in node_.inward_edges:
-                    if parent >= node_.offset:
-                        continue  # don't touch inner loops yet -- we'll handle that case later
-                    node_ = self.blocks[parent]
+            def explore(node_):
+                pass
+                if all(n in dominated_nodes for n in node_.inward_edges):
+                    dominated_nodes.add(node_.offset)
+                    for n in node_.outwards_edges:
+                        explore(self.blocks[n])
 
-            loop_start = node_
-            loop_blocks = [
-                node
-            ]
+            for child in node.outwards_edges:
+                explore(self.blocks[child])
 
-            # if the loop is a single block, don't include children in the loop
-            if loop_start is not node:
-                blocks, _loops = self.order_blocks(loop_start)
-                loop_blocks.extend(
-                    blocks
-                )
+            assert dominated_nodes2 == dominated_nodes
 
+            # step 2: there might be sub-loops within this loop, so recurse to find them
+            # TODO
+
+            loop_blocks = [self.blocks[n] for n in sorted(dominated_nodes)]
             order.append(self.Loop(loop_blocks))
 
-            # ok now lets do the other branch
-            # (there should only be 1 or 0)
+            # # ok now lets do the other branch
+            # # (there should only be 1 or 0)
             for child in node.outwards_edges:
-                if child > node_offset and child != loop_start.offset and child not in visited:
+                if child > node.offset and child not in dominated_nodes and child not in visited:
                     heapq.heappush(queue, child)
                     visited.add(child)
 
@@ -336,7 +233,7 @@ class ControlFlowGraph:
 
     def stackify(self):
         order, loops = self.order_blocks()
-        order_index = {i: block.offset for i, block in enumerate(order)}
+        # order_index = {i: block.offset for i, block in enumerate(order)}
         order_index_inv = {block.offset: i for i, block in enumerate(order)}
 
         # def prev_block(block) -> int:  # returns an offset
@@ -354,7 +251,8 @@ class ControlFlowGraph:
                 if (
                         (start <= x <= end)  # contains x
                         and (y >= end)  # ends before y
-                        # if a scope opens after another one, it must end before it ends
+                        # if a scope opens after another one, the inner scope must end before the outer one end
+                        # (ie: scopes are always nested)
                         # so we only need to expand the start to find the most general one
                         and (most_general_scope[0] > start
                              or (most_general_scope[0] == start and most_general_scope[1] <= end))  # is more general
@@ -390,30 +288,71 @@ class ControlFlowGraph:
             # now we iterate over all the scopes O in increasing order of specificity
             # end of this block:
             jump = self.blocks[edge_start].instructions[-1].offset
-            outer_est_scope = most_general_scope_containing_x_but_ending_before_y(x=jump, y=scope_end)
-            scope_start = outer_est_scope[0]
+            scope_start, _ = most_general_scope_containing_x_but_ending_before_y(x=jump, y=scope_end)
             if scope_start == jump:
                 # that is actually very wrong
                 scope_start = edge_start
             scopes.append((scope_start, scope_end, 'block'))
 
-        return scopes, order
+        # finally: sort the scopes into a tree structure
+        scopes = list(sorted(scopes, key=lambda x: (x[0], x[1])))
+
+        # 1. check forward inward scope stack consistency
+        # (I don't think any backwards edges can have inputs or outputs)
+        # for each forward edge:
+        #   i. find the outermost block scope it crosses
+        #  ii. check both sides of that scope have the same stack size
+        # iii. note down that the scope produces $n$ outputs
+
+        scope_edge_stack_size = {}
+
+        for edge_start, edge_end in pos_edges:
+            scope_end = self.prev_offset(edge_end)
+            jump = self.blocks[edge_start].instructions[-1].offset
+            scope_start, _ = most_general_scope_containing_x_but_ending_before_y(x=jump, y=scope_end)
+            # todo: do we need to do the same hack? I dont think so
+            # so now we have a pseudo-scope for this edge -- does it cross any actual scopes?
+            scope = (scope_start, scope_end, 'block')
+            if scope not in scopes:
+                continue
+
+            block_start = self.blocks[edge_start]
+            block_start_stack_end = self.analyzer.block_ending_stack_size[block_start]
+            block_end = self.blocks[edge_end]
+            block_end_stack_start = self.analyzer.block_starting_stack_size[block_end]
+            assert block_start_stack_end == block_end_stack_start
+
+            if scope not in scope_edge_stack_size:
+                scope_edge_stack_size[scope] = block_start_stack_end
+
+            assert scope_edge_stack_size[scope] == block_start_stack_end
+
+        # 2. change scopes to have results
+        # 3 (extra: also have inputs)
+
+        return scopes, order, scope_edge_stack_size
 
     def generate_control_flow_instructions(self):
-        scopes, order = self.stackify()
+        scopes, order, scope_edge_stack_size = self.stackify()
 
-        # re-write the control flow instructions into 3 easy to use dicts:
+        # re-write the control flow instructions into 4 easy to use dicts:
         # 1+2. where do we put the start/end instructions?
-        # 3. if i'm jumping to `offset`, what label do i jump to?
+        # 3+4. if i'm jumping to `offset`, what label do i jump to?
         before_instruction = defaultdict(list)
         after_instruction = defaultdict(list)
         forward_jump_table = {}
         backward_jump_table = {}
 
-        for start, end, label in scopes:
+        for scope in scopes:
+            start, end, label = scope
+            results = scope_edge_stack_size.get(scope, 0)
             name = f'{label}_{start}_{end}'
-            before_instruction[start].append(f'{label} ${name}')
-            after_instruction[end].append(f'end')
+            if results == 0:
+                start_instr = f'{label} ${name}'
+            else:
+                start_instr = f'{label} ${name} (result {"i32 " * results})'
+            before_instruction[start].insert(0, start_instr)  # bit slow, what can you do, eh
+            after_instruction[end].append(f'end (; {label} ${name} ;)')
 
             if label == 'loop':
                 backward_jump_table[start] = name
@@ -428,38 +367,41 @@ class ControlFlowGraph:
         return flat_order, before_instruction, after_instruction, forward_jump_table, backward_jump_table
 
 
-def to_tree(instr_list: InstructionList):
-    stack = []
-    to_tree_subset(
-        instr_list, 0, stack,
-        {
-            'n': Int,
-            'fib': Function.factory(
-                1,
-                arg_types=[Int],
-                return_type=Int
-            )
-        }
-    )
+class NiceCFG:
+    """A wrapper around CFG to make it a little easier to use"""
+    def __init__(self, func):
+        self.cfg = new_cfg(func)
+        self.func = func
 
+        for b in self.cfg.blocks.values():
+            b.children = [self.cfg.blocks[c] for c in b.outwards_edges]
+            b.parents = [self.cfg.blocks[c] for c in b.inward_edges]
 
-def to_tree_subset(instructions, start, stack, type_map):
-    for instruction in instructions.instructions[start:]:
-        mutate_stack(stack, instruction, type_map)
-        print(instruction.opname, '\t', stack)
-        if instruction.opname in ['POP_JUMP_IF_FALSE']:
-            print("--- START BLOCK ---")
-            new_stack = []  # stack.copy()
-            # bug?? arg seems to be the same as the index here
-            addr = instruction.arg  # instructions.indices[instruction.arg]
-            to_tree_subset(instructions, addr, new_stack, type_map)
-            print("--- END BLOCK ---")
-        elif instruction.opname in ['RETURN_VALUE']:
-            return
+    def flatten(self):
+        bytecode, before, after, fjt, bjt = self.cfg.generate_control_flow_instructions()
+
+        flat_code = [
+            x
+            for i in bytecode
+            for x in [
+                *before[i.offset],
+                i,
+                *after[i.offset]
+            ]
+        ]
+        print('fjt', fjt)
+        print('bjt', bjt)
+
+        def jump(offset, target):
+            if target > offset:
+                return fjt[target]
+            return bjt[target]
+
+        return flat_code, jump
 
 
 def main():
-    from tests.example_files.flow_control import mini_monster, monster
+    from tests.example_files.flow_control import monster
 
     bytecode = dis.Bytecode(monster)
     instr_list = InstructionList(list(bytecode))

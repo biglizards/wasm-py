@@ -31,7 +31,7 @@ def test_pair_swap():
         return b, a
 
     ans = compile_func_to_wasm(swap)(33, 3)
-    assert ans == (3, 33), ans
+    assert ans == (3, 33)
 
 
 def test_undefined_operation():
@@ -74,11 +74,8 @@ def test_while_loop():
         a = 0
         b = 1
         while n != 0:
-            # a, b = b, a + b
-            tmp = a
-            a = b
-            b = b + tmp
-            n = n - 1  # n -= 1
+            a, b = b, a + b
+            n -= 1
         return a
 
     assert efficient_fib(1) == 1
@@ -125,6 +122,66 @@ def test_ambiguous_function_pointer():
     assert foo(4, 2) == 15
 
 
+def test_global_mutation():
+    from example_files.global_mutation import foo, foo_2, call_foo, swap_foo, counter, set_counter
+    call_foo, swap_foo, counter, set_counter, *_ = \
+        compile_multiple(call_foo, swap_foo, counter, set_counter, foo, foo_2)
+
+    assert call_foo() == 0
+    swap_foo()
+    assert call_foo() == 1
+    swap_foo()
+    assert call_foo() == 0
+    swap_foo()
+    assert call_foo() == 1
+
+    # counter increments an un-initialised global -- it should throw an error
+    try:
+        counter()
+        assert False
+    except RuntimeError:
+        pass
+
+    print(set_counter())
+    assert counter() == 1
+    assert counter() == 2
+    assert counter() == 3
+
+
+def test_division():
+    def do_div(a, b):
+        return a / b
+
+    def do_floor_div(a, b):
+        return a // b
+
+    div, floor_div = compile_multiple(do_div, do_floor_div)
+
+    assert div(5, 2) == 2.5
+    assert floor_div(5, 2) == 2
+
+
+def test_global_scope():
+    from example_files.global_scope_1 import assign_x, delete_x, use_x
+    assign_x, delete_x, use_x = compile_multiple(assign_x, delete_x, use_x)
+
+    try:
+        use_x(5)
+        assert False
+    except RuntimeError:
+        pass
+
+    assign_x(3)
+    assert use_x(5) == 8
+
+    delete_x()
+    try:
+        use_x(5)
+        assert False
+    except RuntimeError:
+        pass
+
+
 def bench(f, arg, n=10000):
     import time
     t1 = time.time()
@@ -134,19 +191,20 @@ def bench(f, arg, n=10000):
     t2 = time.time()
     for _ in range(n):
         f(arg)
-    t = time.time() - t2
+    t = time.time() - t2 - t_base
     print(f'took: {t * 1000:03f}ms')
 
 
 if __name__ == '__main__':
-    test_lambda_add()
-    test_func_add()
-    test_pair_swap()
-    test_undefined_operation()  # we expect this one to output some error messages
-    test_simple_flow()
+    # test_lambda_add()
+    # test_func_add()
+    # test_pair_swap()
+    # test_undefined_operation()  # we expect this one to output some error messages
+    # test_simple_flow()
     test_while_loop()
-    test_two_functions()
-    test_fib()
-    test_ambiguous_function_pointer()
+    # test_two_functions()
+    # test_fib()
+    # test_ambiguous_function_pointer()
+    # test_division()
 
 import opcode

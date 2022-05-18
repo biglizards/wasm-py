@@ -1,7 +1,3 @@
-//
-// Created by dave on 11/12/2021.
-//
-
 #include "object.h"
 #include "glue.h"
 #include "cpython/noneobject.h"
@@ -81,7 +77,7 @@ static PyNumberMethods none_as_number = {
         0,                          /* nb_index */
 };
 
-PyTypeObject _PyNone_Type = {
+PyTypeObject PyNone_Type = {
 //        PyVarObject_HEAD_INIT(&PyType_Type, 0)
         TYPE_HEAD
         "NoneType",
@@ -124,7 +120,7 @@ PyTypeObject _PyNone_Type = {
 };
 
 PyObject _Py_NoneStruct = {
-        1, &_PyNone_Type
+        1, &PyNone_Type
 };
 
 PyObject* return_none() {

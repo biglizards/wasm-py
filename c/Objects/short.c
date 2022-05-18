@@ -1,7 +1,3 @@
-//
-// Created by dave on 19/11/2021.
-//
-
 #include "short.h"
 
 Short* new_short(int a);

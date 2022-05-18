@@ -1,7 +1,3 @@
-//
-// Created by dave on 19/11/2021.
-//
-
 #ifndef WASM_PY_SHORT_H
 #define WASM_PY_SHORT_H
 

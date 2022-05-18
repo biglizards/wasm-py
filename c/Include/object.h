@@ -1,7 +1,3 @@
-//
-// Created by dave on 19/11/2021.
-//
-
 #ifndef WASM_PY_OBJECT_H
 #define WASM_PY_OBJECT_H
 
@@ -256,8 +252,12 @@ typedef struct __type {
     PyMappingMethods *tp_as_mapping;
 
     // we deviate from CPython a little by having different fields for each comparison
+    BinTest cmp_lt;
+    BinTest cmp_lte;
     BinTest cmp_eq;
-    BinTest cmp_leq;
+    BinTest cmp_neq;
+    BinTest cmp_gt;
+    BinTest cmp_gte;
 } Type;
 
 // probably should be in a .c file
@@ -265,6 +265,7 @@ extern unsigned int created_objects;
 
 void py_decref(PyObject* a);
 void py_incref(PyObject* a);
+void* py_malloc(int size);
 
 
 // and now, a load of macros for compatability purposes
@@ -318,7 +319,54 @@ static inline void _Py_XDECREF(PyObject *op)
     }
 }
 
+//void py_set_local_decref(PyObject *value, PyObject *old);
+
 #define Py_XDECREF(op) _Py_XDECREF(_PyObject_CAST(op))
+
+
+/* Safely decref `op` and set `op` to NULL, especially useful in tp_clear
+ * and tp_dealloc implementations.
+ *
+ * Note that "the obvious" code can be deadly:
+ *
+ *     Py_XDECREF(op);
+ *     op = NULL;
+ *
+ * Typically, `op` is something like self->containee, and `self` is done
+ * using its `containee` member.  In the code sequence above, suppose
+ * `containee` is non-NULL with a refcount of 1.  Its refcount falls to
+ * 0 on the first line, which can trigger an arbitrary amount of code,
+ * possibly including finalizers (like __del__ methods or weakref callbacks)
+ * coded in Python, which in turn can release the GIL and allow other threads
+ * to run, etc.  Such code may even invoke methods of `self` again, or cause
+ * cyclic gc to trigger, but-- oops! --self->containee still points to the
+ * object being torn down, and it may be in an insane state while being torn
+ * down.  This has in fact been a rich historic source of miserable (rare &
+ * hard-to-diagnose) segfaulting (and other) bugs.
+ *
+ * The safe way is:
+ *
+ *      Py_CLEAR(op);
+ *
+ * That arranges to set `op` to NULL _before_ decref'ing, so that any code
+ * triggered as a side-effect of `op` getting torn down no longer believes
+ * `op` points to a valid object.
+ *
+ * There are cases where it's safe to use the naive code, but they're brittle.
+ * For example, if `op` points to a Python integer, you know that destroying
+ * one of those can't cause problems -- but in part that relies on that
+ * Python integers aren't currently weakly referencable.  Best practice is
+ * to use Py_CLEAR() even if you can't think of a reason for why you need to.
+ */
+#define Py_CLEAR(op)                            \
+    do {                                        \
+        PyObject *_py_tmp = _PyObject_CAST(op); \
+        if (_py_tmp != NULL) {                  \
+            (op) = NULL;                        \
+            Py_DECREF(_py_tmp);                 \
+        }                                       \
+    } while (0)
+
 
 /* Safely decref `op` and set `op` to `op2`.
  *
@@ -399,6 +447,7 @@ _PyIndex_Check(PyObject *obj)
 // Create a new strong reference to an object:
 // increment the reference count of the object and return the object.
 PyAPI_FUNC(PyObject*) Py_NewRef(PyObject *obj);
+PyAPI_FUNC(PyObject*) Py_NewRef(PyObject *obj);
 
 // Similar to Py_NewRef(), but the object can be NULL.
 PyAPI_FUNC(PyObject*) Py_XNewRef(PyObject *obj);
@@ -423,6 +472,16 @@ static inline PyObject* _Py_XNewRef(PyObject *obj)
 
 
 PyAPI_FUNC(int) PyObject_IsTrue(PyObject *);
+
+// todo fix
+/*
+Py_NotImplemented is a singleton used to signal that an operation is
+not implemented for a given type combination.
+*/
+struct _Py_NotImplementedStruct {};
+PyAPI_DATA(PyObject) _Py_NotImplementedStruct; /* Don't use this directly */
+#define Py_NotImplemented (&_Py_NotImplementedStruct)
+
 
 
 #endif //WASM_PY_OBJECT_H

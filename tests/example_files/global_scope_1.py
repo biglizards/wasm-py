@@ -1,12 +1,12 @@
-def init(y):
+def assign_x(y):
     global x
     x = y
 
 
-def de_init():
+def delete_x():
     global x
     del x
 
 
 def use_x(y):
-    return x+y
+    return x + y

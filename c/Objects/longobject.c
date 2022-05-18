@@ -13,6 +13,9 @@
 #include "object.h"
 #include "cpython/longintrepr.h"
 #include "cpython/longobject.h"
+#include "cpython/floatobject.h"
+#include "cpython/tupleobject.h"
+#include "cpython/noneobject.h"
 
 #include "glue.h"
 
@@ -20,6 +23,9 @@
 #include <ctype.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include <math.h>
+#include <string.h>
+
 
 
 //#include "clinic/longobject.c.h"
@@ -54,7 +60,7 @@ medium_value(PyLongObject* x) {
     return ((stwodigits)Py_SIZE(x)) * x->ob_digit[0];
 }
 
-//#define IS_SMALL_INT(ival) (-NSMALLNEGINTS <= (ival) && (ival) < NSMALLPOSINTS)
+#define IS_SMALL_INT(ival) (-NSMALLNEGINTS <= (ival) && (ival) < NSMALLPOSINTS)
 //#define IS_SMALL_UINT(ival) ((ival) < NSMALLPOSINTS)
 
 static inline int is_medium_int(stwodigits x) {
@@ -65,7 +71,7 @@ static inline int is_medium_int(stwodigits x) {
 
 static PyObject*
 get_small_int(sdigit ival) {
-//    assert(IS_SMALL_INT(ival));  // todo is this sound? so far, yes, we always check before calling
+    assert(IS_SMALL_INT(ival));  // todo is this sound? so far, yes, we always check before calling
     PyObject* v = __PyLong_GetSmallInt_internal(ival);
     Py_INCREF(v);
     return v;
@@ -98,6 +104,9 @@ maybe_small_long(PyLongObject* v) {
  */
 #define FIVEARY_CUTOFF 8
 
+// not sure what this does, something relating to error handling?
+// todo restore
+#define SIGCHECK(x) do {} while (0)
 //#define SIGCHECK(PyTryBlock)                    \
 //    do {                                        \
 //        if (PyErr_CheckSignals()) PyTryBlock    \
@@ -143,7 +152,8 @@ _PyLong_New(Py_ssize_t size) {
        sizeof(PyVarObject) instead of the offsetof, but this risks being
        incorrect in the presence of padding between the PyVarObject header
        and the digits. */
-    result = malloc(offsetof(PyLongObject, ob_digit) +
+//    created_objects++;
+    result = py_malloc(offsetof(PyLongObject, ob_digit) +
                     ndigits * sizeof(digit));
     if (!result) {
         PANIC("_PyLong_New out of memory!");
@@ -182,10 +192,11 @@ _PyLong_Copy(PyLongObject *src)
 
 static PyObject*
 _PyLong_FromMedium(sdigit x) {
-//    assert(!IS_SMALL_INT(x));  // soundness: we just checked both of these things
-//    assert(is_medium_int(x));  // is assert removed in non-debug builds? because that would really make sense
+    assert(!IS_SMALL_INT(x));  // soundness: we just checked both of these things
+    assert(is_medium_int(x));  // is assert removed in non-debug builds? because that would really make sense
     /* We could use a freelist here */
-    PyLongObject * v = malloc(sizeof(PyLongObject));
+//    created_objects++;
+    PyLongObject * v = py_malloc(sizeof(PyLongObject));
     if (v == NULL) {
         PANIC("_PyLong_FromMedium out of memory!");
 //        PyErr_NoMemory();
@@ -249,23 +260,23 @@ _PyLong_FromSTwoDigits(stwodigits x) {
     return _PyLong_FromLarge(x);
 }
 
-///* If a freshly-allocated int is already shared, it must
-//   be a small integer, so negating it must go to PyLong_FromLong */
-//Py_LOCAL_INLINE(void)
-//_PyLong_Negate(PyLongObject **x_p)
-//{
-//    PyLongObject *x;
-//
-//    x = (PyLongObject *)*x_p;
-//    if (Py_REFCNT(x) == 1) {
-//        Py_SET_SIZE(x, -Py_SIZE(x));
-//        return;
-//    }
-//
-//    *x_p = (PyLongObject *)_PyLong_FromSTwoDigits(-medium_value(x));
-//    Py_DECREF(x);
-//}
-//
+/* If a freshly-allocated int is already shared, it must
+   be a small integer, so negating it must go to PyLong_FromLong */
+Py_LOCAL_INLINE(void)
+_PyLong_Negate(PyLongObject **x_p)
+{
+    PyLongObject *x;
+
+    x = (PyLongObject *)*x_p;
+    if (Py_REFCNT(x) == 1) {
+        Py_SET_SIZE(x, -Py_SIZE(x));
+        return;
+    }
+
+    *x_p = (PyLongObject *)_PyLong_FromSTwoDigits(-medium_value(x));
+    Py_DECREF(x);
+}
+
 /* Create a new int object from a C long int */
 PyObject*
 PyLong_FromLong(long ival) {
@@ -361,64 +372,64 @@ PyLong_FromLong(long ival) {
 //{
 //    PYLONG_FROM_UINT(size_t, ival);
 //}
-//
-///* Create a new int object from a C double */
-//
-//PyObject *
-//PyLong_FromDouble(double dval)
-//{
-//    /* Try to get out cheap if this fits in a long. When a finite value of real
-//     * floating type is converted to an integer type, the value is truncated
-//     * toward zero. If the value of the integral part cannot be represented by
-//     * the integer type, the behavior is undefined. Thus, we must check that
-//     * value is in range (LONG_MIN - 1, LONG_MAX + 1). If a long has more bits
-//     * of precision than a double, casting LONG_MIN - 1 to double may yield an
-//     * approximation, but LONG_MAX + 1 is a power of two and can be represented
-//     * as double exactly (assuming FLT_RADIX is 2 or 16), so for simplicity
-//     * check against [-(LONG_MAX + 1), LONG_MAX + 1).
-//     */
-//    const double int_max = (unsigned long)LONG_MAX + 1;
-//    if (-int_max < dval && dval < int_max) {
-//        return PyLong_FromLong((long)dval);
-//    }
-//
-//    PyLongObject *v;
-//    double frac;
-//    int i, ndig, expo, neg;
-//    neg = 0;
-//    if (Py_IS_INFINITY(dval)) {
-//        PyErr_SetString(PyExc_OverflowError,
-//                        "cannot convert float infinity to integer");
-//        return NULL;
-//    }
-//    if (Py_IS_NAN(dval)) {
-//        PyErr_SetString(PyExc_ValueError,
-//                        "cannot convert float NaN to integer");
-//        return NULL;
-//    }
-//    if (dval < 0.0) {
-//        neg = 1;
-//        dval = -dval;
-//    }
-//    frac = frexp(dval, &expo); /* dval = frac*2**expo; 0.0 <= frac < 1.0 */
-//    assert(expo > 0);
-//    ndig = (expo-1) / PyLong_SHIFT + 1; /* Number of 'digits' in result */
-//    v = _PyLong_New(ndig);
-//    if (v == NULL)
-//        return NULL;
-//    frac = ldexp(frac, (expo-1) % PyLong_SHIFT + 1);
-//    for (i = ndig; --i >= 0; ) {
-//        digit bits = (digit)frac;
-//        v->ob_digit[i] = bits;
-//        frac = frac - (double)bits;
-//        frac = ldexp(frac, PyLong_SHIFT);
-//    }
-//    if (neg) {
-//        Py_SET_SIZE(v, -(Py_SIZE(v)));
-//    }
-//    return (PyObject *)v;
-//}
-//
+
+/* Create a new int object from a C double */
+
+PyObject *
+PyLong_FromDouble(double dval)
+{
+    /* Try to get out cheap if this fits in a long. When a finite value of real
+     * floating type is converted to an integer type, the value is truncated
+     * toward zero. If the value of the integral part cannot be represented by
+     * the integer type, the behavior is undefined. Thus, we must check that
+     * value is in range (LONG_MIN - 1, LONG_MAX + 1). If a long has more bits
+     * of precision than a double, casting LONG_MIN - 1 to double may yield an
+     * approximation, but LONG_MAX + 1 is a power of two and can be represented
+     * as double exactly (assuming FLT_RADIX is 2 or 16), so for simplicity
+     * check against [-(LONG_MAX + 1), LONG_MAX + 1).
+     */
+    const double int_max = (unsigned long)LONG_MAX + 1;
+    if (-int_max < dval && dval < int_max) {
+        return PyLong_FromLong((long)dval);
+    }
+
+    PyLongObject *v;
+    double frac;
+    int i, ndig, expo, neg;
+    neg = 0;
+    if (Py_IS_INFINITY(dval)) {
+        PyErr_SetString(PyExc_OverflowError,
+                        "cannot convert float infinity to integer");
+        return NULL;
+    }
+    if (Py_IS_NAN(dval)) {
+        PyErr_SetString(PyExc_ValueError,
+                        "cannot convert float NaN to integer");
+        return NULL;
+    }
+    if (dval < 0.0) {
+        neg = 1;
+        dval = -dval;
+    }
+    frac = frexp(dval, &expo); /* dval = frac*2**expo; 0.0 <= frac < 1.0 */
+    assert(expo > 0);
+    ndig = (expo-1) / PyLong_SHIFT + 1; /* Number of 'digits' in result */
+    v = _PyLong_New(ndig);
+    if (v == NULL)
+        return NULL;
+    frac = ldexp(frac, (expo-1) % PyLong_SHIFT + 1);
+    for (i = ndig; --i >= 0; ) {
+        digit bits = (digit)frac;
+        v->ob_digit[i] = bits;
+        frac = frac - (double)bits;
+        frac = ldexp(frac, PyLong_SHIFT);
+    }
+    if (neg) {
+        Py_SET_SIZE(v, -(Py_SIZE(v)));
+    }
+    return (PyObject *)v;
+}
+
 /* Checking for overflow in PyLong_AsLong is a PITA since C doesn't define
  * anything about what happens when a signed integer operation overflows,
  * and some compilers think they're doing you a favor by being "clever"
@@ -767,14 +778,14 @@ PyLong_AsSsize_t(PyObject* vv) {
 //
 //    return Py_SIZE(v) == 0 ? 0 : (Py_SIZE(v) < 0 ? -1 : 1);
 //}
-//
-//static int
-//bit_length_digit(digit x)
-//{
-//    Py_BUILD_ASSERT(PyLong_SHIFT <= sizeof(unsigned long) * 8);
-//    return _Py_bit_length((unsigned long)x);
-//}
-//
+
+static int
+bit_length_digit(digit x)
+{
+    Py_BUILD_ASSERT(PyLong_SHIFT <= sizeof(unsigned long) * 8);
+    return _Py_bit_length((unsigned long)x);
+}
+
 //size_t
 //_PyLong_NumBits(PyObject *vv)
 //{
@@ -1524,137 +1535,137 @@ PyLong_AsSsize_t(PyObject* vv) {
 //        if (!PyLong_Check(v) || !PyLong_Check(w))       \
 //            Py_RETURN_NOTIMPLEMENTED;                   \
 //    } while(0)
-//
-///* x[0:m] and y[0:n] are digit vectors, LSD first, m >= n required.  x[0:n]
-// * is modified in place, by adding y to it.  Carries are propagated as far as
-// * x[m-1], and the remaining carry (0 or 1) is returned.
-// */
-//static digit
-//v_iadd(digit *x, Py_ssize_t m, digit *y, Py_ssize_t n)
-//{
-//    Py_ssize_t i;
-//    digit carry = 0;
-//
-//    assert(m >= n);
-//    for (i = 0; i < n; ++i) {
-//        carry += x[i] + y[i];
-//        x[i] = carry & PyLong_MASK;
-//        carry >>= PyLong_SHIFT;
-//        assert((carry & 1) == carry);
-//    }
-//    for (; carry && i < m; ++i) {
-//        carry += x[i];
-//        x[i] = carry & PyLong_MASK;
-//        carry >>= PyLong_SHIFT;
-//        assert((carry & 1) == carry);
-//    }
-//    return carry;
-//}
-//
-///* x[0:m] and y[0:n] are digit vectors, LSD first, m >= n required.  x[0:n]
-// * is modified in place, by subtracting y from it.  Borrows are propagated as
-// * far as x[m-1], and the remaining borrow (0 or 1) is returned.
-// */
-//static digit
-//v_isub(digit *x, Py_ssize_t m, digit *y, Py_ssize_t n)
-//{
-//    Py_ssize_t i;
-//    digit borrow = 0;
-//
-//    assert(m >= n);
-//    for (i = 0; i < n; ++i) {
-//        borrow = x[i] - y[i] - borrow;
-//        x[i] = borrow & PyLong_MASK;
-//        borrow >>= PyLong_SHIFT;
-//        borrow &= 1;            /* keep only 1 sign bit */
-//    }
-//    for (; borrow && i < m; ++i) {
-//        borrow = x[i] - borrow;
-//        x[i] = borrow & PyLong_MASK;
-//        borrow >>= PyLong_SHIFT;
-//        borrow &= 1;
-//    }
-//    return borrow;
-//}
-//
-///* Shift digit vector a[0:m] d bits left, with 0 <= d < PyLong_SHIFT.  Put
-// * result in z[0:m], and return the d bits shifted out of the top.
-// */
-//static digit
-//v_lshift(digit *z, digit *a, Py_ssize_t m, int d)
-//{
-//    Py_ssize_t i;
-//    digit carry = 0;
-//
-//    assert(0 <= d && d < PyLong_SHIFT);
-//    for (i=0; i < m; i++) {
-//        twodigits acc = (twodigits)a[i] << d | carry;
-//        z[i] = (digit)acc & PyLong_MASK;
-//        carry = (digit)(acc >> PyLong_SHIFT);
-//    }
-//    return carry;
-//}
-//
-///* Shift digit vector a[0:m] d bits right, with 0 <= d < PyLong_SHIFT.  Put
-// * result in z[0:m], and return the d bits shifted out of the bottom.
-// */
-//static digit
-//v_rshift(digit *z, digit *a, Py_ssize_t m, int d)
-//{
-//    Py_ssize_t i;
-//    digit carry = 0;
-//    digit mask = ((digit)1 << d) - 1U;
-//
-//    assert(0 <= d && d < PyLong_SHIFT);
-//    for (i=m; i-- > 0;) {
-//        twodigits acc = (twodigits)carry << PyLong_SHIFT | a[i];
-//        carry = (digit)acc & mask;
-//        z[i] = (digit)(acc >> d);
-//    }
-//    return carry;
-//}
-//
-///* Divide long pin, w/ size digits, by non-zero digit n, storing quotient
-//   in pout, and returning the remainder.  pin and pout point at the LSD.
-//   It's OK for pin == pout on entry, which saves oodles of mallocs/frees in
-//   _PyLong_Format, but that should be done with great care since ints are
-//   immutable. */
-//
-//static digit
-//inplace_divrem1(digit *pout, digit *pin, Py_ssize_t size, digit n)
-//{
-//    twodigits rem = 0;
-//
-//    assert(n > 0 && n <= PyLong_MASK);
-//    pin += size;
-//    pout += size;
-//    while (--size >= 0) {
-//        digit hi;
-//        rem = (rem << PyLong_SHIFT) | *--pin;
-//        *--pout = hi = (digit)(rem / n);
-//        rem -= (twodigits)hi * n;
-//    }
-//    return (digit)rem;
-//}
-//
-///* Divide an integer by a digit, returning both the quotient
-//   (as function result) and the remainder (through *prem).
-//   The sign of a is ignored; n should not be zero. */
-//
-//static PyLongObject *
-//divrem1(PyLongObject *a, digit n, digit *prem)
-//{
-//    const Py_ssize_t size = Py_ABS(Py_SIZE(a));
-//    PyLongObject *z;
-//
-//    assert(n > 0 && n <= PyLong_MASK);
-//    z = _PyLong_New(size);
-//    if (z == NULL)
-//        return NULL;
-//    *prem = inplace_divrem1(z->ob_digit, a->ob_digit, size, n);
-//    return long_normalize(z);
-//}
-//
+
+/* x[0:m] and y[0:n] are digit vectors, LSD first, m >= n required.  x[0:n]
+ * is modified in place, by adding y to it.  Carries are propagated as far as
+ * x[m-1], and the remaining carry (0 or 1) is returned.
+ */
+static digit
+v_iadd(digit *x, Py_ssize_t m, digit *y, Py_ssize_t n)
+{
+    Py_ssize_t i;
+    digit carry = 0;
+
+    assert(m >= n);
+    for (i = 0; i < n; ++i) {
+        carry += x[i] + y[i];
+        x[i] = carry & PyLong_MASK;
+        carry >>= PyLong_SHIFT;
+        assert((carry & 1) == carry);
+    }
+    for (; carry && i < m; ++i) {
+        carry += x[i];
+        x[i] = carry & PyLong_MASK;
+        carry >>= PyLong_SHIFT;
+        assert((carry & 1) == carry);
+    }
+    return carry;
+}
+
+/* x[0:m] and y[0:n] are digit vectors, LSD first, m >= n required.  x[0:n]
+ * is modified in place, by subtracting y from it.  Borrows are propagated as
+ * far as x[m-1], and the remaining borrow (0 or 1) is returned.
+ */
+static digit
+v_isub(digit *x, Py_ssize_t m, digit *y, Py_ssize_t n)
+{
+    Py_ssize_t i;
+    digit borrow = 0;
+
+    assert(m >= n);
+    for (i = 0; i < n; ++i) {
+        borrow = x[i] - y[i] - borrow;
+        x[i] = borrow & PyLong_MASK;
+        borrow >>= PyLong_SHIFT;
+        borrow &= 1;            /* keep only 1 sign bit */
+    }
+    for (; borrow && i < m; ++i) {
+        borrow = x[i] - borrow;
+        x[i] = borrow & PyLong_MASK;
+        borrow >>= PyLong_SHIFT;
+        borrow &= 1;
+    }
+    return borrow;
+}
+
+/* Shift digit vector a[0:m] d bits left, with 0 <= d < PyLong_SHIFT.  Put
+ * result in z[0:m], and return the d bits shifted out of the top.
+ */
+static digit
+v_lshift(digit *z, digit *a, Py_ssize_t m, int d)
+{
+    Py_ssize_t i;
+    digit carry = 0;
+
+    assert(0 <= d && d < PyLong_SHIFT);
+    for (i=0; i < m; i++) {
+        twodigits acc = (twodigits)a[i] << d | carry;
+        z[i] = (digit)acc & PyLong_MASK;
+        carry = (digit)(acc >> PyLong_SHIFT);
+    }
+    return carry;
+}
+
+/* Shift digit vector a[0:m] d bits right, with 0 <= d < PyLong_SHIFT.  Put
+ * result in z[0:m], and return the d bits shifted out of the bottom.
+ */
+static digit
+v_rshift(digit *z, digit *a, Py_ssize_t m, int d)
+{
+    Py_ssize_t i;
+    digit carry = 0;
+    digit mask = ((digit)1 << d) - 1U;
+
+    assert(0 <= d && d < PyLong_SHIFT);
+    for (i=m; i-- > 0;) {
+        twodigits acc = (twodigits)carry << PyLong_SHIFT | a[i];
+        carry = (digit)acc & mask;
+        z[i] = (digit)(acc >> d);
+    }
+    return carry;
+}
+
+/* Divide long pin, w/ size digits, by non-zero digit n, storing quotient
+   in pout, and returning the remainder.  pin and pout point at the LSD.
+   It's OK for pin == pout on entry, which saves oodles of mallocs/frees in
+   _PyLong_Format, but that should be done with great care since ints are
+   immutable. */
+
+static digit
+inplace_divrem1(digit *pout, digit *pin, Py_ssize_t size, digit n)
+{
+    twodigits rem = 0;
+
+    assert(n > 0 && n <= PyLong_MASK);
+    pin += size;
+    pout += size;
+    while (--size >= 0) {
+        digit hi;
+        rem = (rem << PyLong_SHIFT) | *--pin;
+        *--pout = hi = (digit)(rem / n);
+        rem -= (twodigits)hi * n;
+    }
+    return (digit)rem;
+}
+
+/* Divide an integer by a digit, returning both the quotient
+   (as function result) and the remainder (through *prem).
+   The sign of a is ignored; n should not be zero. */
+
+static PyLongObject *
+divrem1(PyLongObject *a, digit n, digit *prem)
+{
+    const Py_ssize_t size = Py_ABS(Py_SIZE(a));
+    PyLongObject *z;
+
+    assert(n > 0 && n <= PyLong_MASK);
+    z = _PyLong_New(size);
+    if (z == NULL)
+        return NULL;
+    *prem = inplace_divrem1(z->ob_digit, a->ob_digit, size, n);
+    return long_normalize(z);
+}
+
 ///* Convert an integer to a base 10 string.  Returns a new non-shared
 //   string.  (Return value is non-shared so that callers can modify the
 //   returned value if necessary.) */
@@ -2602,361 +2613,361 @@ PyLong_AsSsize_t(PyObject* vv) {
 //                 base, u);
 //    return NULL;
 //}
-//
-///* forward */
-//static PyLongObject *x_divrem
-//    (PyLongObject *, PyLongObject *, PyLongObject **);
-//static PyObject *long_long(PyObject *v);
-//
-///* Int division with remainder, top-level routine */
-//
-//static int
-//long_divrem(PyLongObject *a, PyLongObject *b,
-//            PyLongObject **pdiv, PyLongObject **prem)
-//{
-//    Py_ssize_t size_a = Py_ABS(Py_SIZE(a)), size_b = Py_ABS(Py_SIZE(b));
-//    PyLongObject *z;
-//
-//    if (size_b == 0) {
-//        PyErr_SetString(PyExc_ZeroDivisionError,
-//                        "integer division or modulo by zero");
-//        return -1;
-//    }
-//    if (size_a < size_b ||
-//        (size_a == size_b &&
-//         a->ob_digit[size_a-1] < b->ob_digit[size_b-1])) {
-//        /* |a| < |b|. */
-//        *prem = (PyLongObject *)long_long((PyObject *)a);
-//        if (*prem == NULL) {
-//            return -1;
-//        }
-//        PyObject *zero = _PyLong_GetZero();
-//        Py_INCREF(zero);
-//        *pdiv = (PyLongObject*)zero;
-//        return 0;
-//    }
-//    if (size_b == 1) {
-//        digit rem = 0;
-//        z = divrem1(a, b->ob_digit[0], &rem);
-//        if (z == NULL)
-//            return -1;
-//        *prem = (PyLongObject *) PyLong_FromLong((long)rem);
-//        if (*prem == NULL) {
-//            Py_DECREF(z);
-//            return -1;
-//        }
-//    }
-//    else {
-//        z = x_divrem(a, b, prem);
-//        if (z == NULL)
-//            return -1;
-//    }
-//    /* Set the signs.
-//       The quotient z has the sign of a*b;
-//       the remainder r has the sign of a,
-//       so a = b*z + r. */
-//    if ((Py_SIZE(a) < 0) != (Py_SIZE(b) < 0)) {
-//        _PyLong_Negate(&z);
-//        if (z == NULL) {
-//            Py_CLEAR(*prem);
-//            return -1;
-//        }
-//    }
-//    if (Py_SIZE(a) < 0 && Py_SIZE(*prem) != 0) {
-//        _PyLong_Negate(prem);
-//        if (*prem == NULL) {
-//            Py_DECREF(z);
-//            Py_CLEAR(*prem);
-//            return -1;
-//        }
-//    }
-//    *pdiv = maybe_small_long(z);
-//    return 0;
-//}
-//
-///* Unsigned int division with remainder -- the algorithm.  The arguments v1
-//   and w1 should satisfy 2 <= Py_ABS(Py_SIZE(w1)) <= Py_ABS(Py_SIZE(v1)). */
-//
-//static PyLongObject *
-//x_divrem(PyLongObject *v1, PyLongObject *w1, PyLongObject **prem)
-//{
-//    PyLongObject *v, *w, *a;
-//    Py_ssize_t i, k, size_v, size_w;
-//    int d;
-//    digit wm1, wm2, carry, q, r, vtop, *v0, *vk, *w0, *ak;
-//    twodigits vv;
-//    sdigit zhi;
-//    stwodigits z;
-//
-//    /* We follow Knuth [The Art of Computer Programming, Vol. 2 (3rd
-//       edn.), section 4.3.1, Algorithm D], except that we don't explicitly
-//       handle the special case when the initial estimate q for a quotient
-//       digit is >= PyLong_BASE: the max value for q is PyLong_BASE+1, and
-//       that won't overflow a digit. */
-//
-//    /* allocate space; w will also be used to hold the final remainder */
-//    size_v = Py_ABS(Py_SIZE(v1));
-//    size_w = Py_ABS(Py_SIZE(w1));
-//    assert(size_v >= size_w && size_w >= 2); /* Assert checks by div() */
-//    v = _PyLong_New(size_v+1);
-//    if (v == NULL) {
-//        *prem = NULL;
-//        return NULL;
-//    }
-//    w = _PyLong_New(size_w);
-//    if (w == NULL) {
-//        Py_DECREF(v);
-//        *prem = NULL;
-//        return NULL;
-//    }
-//
-//    /* normalize: shift w1 left so that its top digit is >= PyLong_BASE/2.
-//       shift v1 left by the same amount.  Results go into w and v. */
-//    d = PyLong_SHIFT - bit_length_digit(w1->ob_digit[size_w-1]);
-//    carry = v_lshift(w->ob_digit, w1->ob_digit, size_w, d);
-//    assert(carry == 0);
-//    carry = v_lshift(v->ob_digit, v1->ob_digit, size_v, d);
-//    if (carry != 0 || v->ob_digit[size_v-1] >= w->ob_digit[size_w-1]) {
-//        v->ob_digit[size_v] = carry;
-//        size_v++;
-//    }
-//
-//    /* Now v->ob_digit[size_v-1] < w->ob_digit[size_w-1], so quotient has
-//       at most (and usually exactly) k = size_v - size_w digits. */
-//    k = size_v - size_w;
-//    assert(k >= 0);
-//    a = _PyLong_New(k);
-//    if (a == NULL) {
-//        Py_DECREF(w);
-//        Py_DECREF(v);
-//        *prem = NULL;
-//        return NULL;
-//    }
-//    v0 = v->ob_digit;
-//    w0 = w->ob_digit;
-//    wm1 = w0[size_w-1];
-//    wm2 = w0[size_w-2];
-//    for (vk = v0+k, ak = a->ob_digit + k; vk-- > v0;) {
-//        /* inner loop: divide vk[0:size_w+1] by w0[0:size_w], giving
-//           single-digit quotient q, remainder in vk[0:size_w]. */
-//
-//        SIGCHECK({
-//                Py_DECREF(a);
-//                Py_DECREF(w);
-//                Py_DECREF(v);
-//                *prem = NULL;
-//                return NULL;
-//            });
-//
-//        /* estimate quotient digit q; may overestimate by 1 (rare) */
-//        vtop = vk[size_w];
-//        assert(vtop <= wm1);
-//        vv = ((twodigits)vtop << PyLong_SHIFT) | vk[size_w-1];
-//        q = (digit)(vv / wm1);
-//        r = (digit)(vv - (twodigits)wm1 * q); /* r = vv % wm1 */
-//        while ((twodigits)wm2 * q > (((twodigits)r << PyLong_SHIFT)
-//                                     | vk[size_w-2])) {
-//            --q;
-//            r += wm1;
-//            if (r >= PyLong_BASE)
-//                break;
-//        }
-//        assert(q <= PyLong_BASE);
-//
-//        /* subtract q*w0[0:size_w] from vk[0:size_w+1] */
-//        zhi = 0;
-//        for (i = 0; i < size_w; ++i) {
-//            /* invariants: -PyLong_BASE <= -q <= zhi <= 0;
-//               -PyLong_BASE * q <= z < PyLong_BASE */
-//            z = (sdigit)vk[i] + zhi -
-//                (stwodigits)q * (stwodigits)w0[i];
-//            vk[i] = (digit)z & PyLong_MASK;
-//            zhi = (sdigit)Py_ARITHMETIC_RIGHT_SHIFT(stwodigits,
-//                                                    z, PyLong_SHIFT);
-//        }
-//
-//        /* add w back if q was too large (this branch taken rarely) */
-//        assert((sdigit)vtop + zhi == -1 || (sdigit)vtop + zhi == 0);
-//        if ((sdigit)vtop + zhi < 0) {
-//            carry = 0;
-//            for (i = 0; i < size_w; ++i) {
-//                carry += vk[i] + w0[i];
-//                vk[i] = carry & PyLong_MASK;
-//                carry >>= PyLong_SHIFT;
-//            }
-//            --q;
-//        }
-//
-//        /* store quotient digit */
-//        assert(q < PyLong_BASE);
-//        *--ak = q;
-//    }
-//
-//    /* unshift remainder; we reuse w to store the result */
-//    carry = v_rshift(w0, v0, size_w, d);
-//    assert(carry==0);
-//    Py_DECREF(v);
-//
-//    *prem = long_normalize(w);
-//    return long_normalize(a);
-//}
-//
-///* For a nonzero PyLong a, express a in the form x * 2**e, with 0.5 <=
-//   abs(x) < 1.0 and e >= 0; return x and put e in *e.  Here x is
-//   rounded to DBL_MANT_DIG significant bits using round-half-to-even.
-//   If a == 0, return 0.0 and set *e = 0.  If the resulting exponent
-//   e is larger than PY_SSIZE_T_MAX, raise OverflowError and return
-//   -1.0. */
-//
-///* attempt to define 2.0**DBL_MANT_DIG as a compile-time constant */
-//#if DBL_MANT_DIG == 53
-//#define EXP2_DBL_MANT_DIG 9007199254740992.0
-//#else
-//#define EXP2_DBL_MANT_DIG (ldexp(1.0, DBL_MANT_DIG))
-//#endif
-//
-//double
-//_PyLong_Frexp(PyLongObject *a, Py_ssize_t *e)
-//{
-//    Py_ssize_t a_size, a_bits, shift_digits, shift_bits, x_size;
-//    /* See below for why x_digits is always large enough. */
-//    digit rem;
-//    digit x_digits[2 + (DBL_MANT_DIG + 1) / PyLong_SHIFT] = {0,};
-//    double dx;
-//    /* Correction term for round-half-to-even rounding.  For a digit x,
-//       "x + half_even_correction[x & 7]" gives x rounded to the nearest
-//       multiple of 4, rounding ties to a multiple of 8. */
-//    static const int half_even_correction[8] = {0, -1, -2, 1, 0, -1, 2, 1};
-//
-//    a_size = Py_ABS(Py_SIZE(a));
-//    if (a_size == 0) {
-//        /* Special case for 0: significand 0.0, exponent 0. */
-//        *e = 0;
-//        return 0.0;
-//    }
-//    a_bits = bit_length_digit(a->ob_digit[a_size-1]);
-//    /* The following is an overflow-free version of the check
-//       "if ((a_size - 1) * PyLong_SHIFT + a_bits > PY_SSIZE_T_MAX) ..." */
-//    if (a_size >= (PY_SSIZE_T_MAX - 1) / PyLong_SHIFT + 1 &&
-//        (a_size > (PY_SSIZE_T_MAX - 1) / PyLong_SHIFT + 1 ||
-//         a_bits > (PY_SSIZE_T_MAX - 1) % PyLong_SHIFT + 1))
-//        goto overflow;
-//    a_bits = (a_size - 1) * PyLong_SHIFT + a_bits;
-//
-//    /* Shift the first DBL_MANT_DIG + 2 bits of a into x_digits[0:x_size]
-//       (shifting left if a_bits <= DBL_MANT_DIG + 2).
-//
-//       Number of digits needed for result: write // for floor division.
-//       Then if shifting left, we end up using
-//
-//         1 + a_size + (DBL_MANT_DIG + 2 - a_bits) // PyLong_SHIFT
-//
-//       digits.  If shifting right, we use
-//
-//         a_size - (a_bits - DBL_MANT_DIG - 2) // PyLong_SHIFT
-//
-//       digits.  Using a_size = 1 + (a_bits - 1) // PyLong_SHIFT along with
-//       the inequalities
-//
-//         m // PyLong_SHIFT + n // PyLong_SHIFT <= (m + n) // PyLong_SHIFT
-//         m // PyLong_SHIFT - n // PyLong_SHIFT <=
-//                                          1 + (m - n - 1) // PyLong_SHIFT,
-//
-//       valid for any integers m and n, we find that x_size satisfies
-//
-//         x_size <= 2 + (DBL_MANT_DIG + 1) // PyLong_SHIFT
-//
-//       in both cases.
-//    */
-//    if (a_bits <= DBL_MANT_DIG + 2) {
-//        shift_digits = (DBL_MANT_DIG + 2 - a_bits) / PyLong_SHIFT;
-//        shift_bits = (DBL_MANT_DIG + 2 - a_bits) % PyLong_SHIFT;
-//        x_size = shift_digits;
-//        rem = v_lshift(x_digits + x_size, a->ob_digit, a_size,
-//                       (int)shift_bits);
-//        x_size += a_size;
-//        x_digits[x_size++] = rem;
-//    }
-//    else {
-//        shift_digits = (a_bits - DBL_MANT_DIG - 2) / PyLong_SHIFT;
-//        shift_bits = (a_bits - DBL_MANT_DIG - 2) % PyLong_SHIFT;
-//        rem = v_rshift(x_digits, a->ob_digit + shift_digits,
-//                       a_size - shift_digits, (int)shift_bits);
-//        x_size = a_size - shift_digits;
-//        /* For correct rounding below, we need the least significant
-//           bit of x to be 'sticky' for this shift: if any of the bits
-//           shifted out was nonzero, we set the least significant bit
-//           of x. */
-//        if (rem)
-//            x_digits[0] |= 1;
-//        else
-//            while (shift_digits > 0)
-//                if (a->ob_digit[--shift_digits]) {
-//                    x_digits[0] |= 1;
-//                    break;
-//                }
-//    }
-//    assert(1 <= x_size && x_size <= (Py_ssize_t)Py_ARRAY_LENGTH(x_digits));
-//
-//    /* Round, and convert to double. */
-//    x_digits[0] += half_even_correction[x_digits[0] & 7];
-//    dx = x_digits[--x_size];
-//    while (x_size > 0)
-//        dx = dx * PyLong_BASE + x_digits[--x_size];
-//
-//    /* Rescale;  make correction if result is 1.0. */
-//    dx /= 4.0 * EXP2_DBL_MANT_DIG;
-//    if (dx == 1.0) {
-//        if (a_bits == PY_SSIZE_T_MAX)
-//            goto overflow;
-//        dx = 0.5;
-//        a_bits += 1;
-//    }
-//
-//    *e = a_bits;
-//    return Py_SIZE(a) < 0 ? -dx : dx;
-//
-//  overflow:
-//    /* exponent > PY_SSIZE_T_MAX */
-//    PyErr_SetString(PyExc_OverflowError,
-//                    "huge integer: number of bits overflows a Py_ssize_t");
-//    *e = 0;
-//    return -1.0;
-//}
-//
-///* Get a C double from an int object.  Rounds to the nearest double,
-//   using the round-half-to-even rule in the case of a tie. */
-//
-//double
-//PyLong_AsDouble(PyObject *v)
-//{
-//    Py_ssize_t exponent;
-//    double x;
-//
-//    if (v == NULL) {
-//        PyErr_BadInternalCall();
-//        return -1.0;
-//    }
-//    if (!PyLong_Check(v)) {
-//        PyErr_SetString(PyExc_TypeError, "an integer is required");
-//        return -1.0;
-//    }
-//    if (IS_MEDIUM_VALUE(v)) {
-//        /* Fast path; single digit long (31 bits) will cast safely
-//           to double.  This improves performance of FP/long operations
-//           by 20%.
-//        */
-//        return (double)medium_value((PyLongObject *)v);
-//    }
-//    x = _PyLong_Frexp((PyLongObject *)v, &exponent);
-//    if ((x == -1.0 && PyErr_Occurred()) || exponent > DBL_MAX_EXP) {
-//        PyErr_SetString(PyExc_OverflowError,
-//                        "int too large to convert to float");
-//        return -1.0;
-//    }
-//    return ldexp(x, (int)exponent);
-//}
-//
+
+/* forward */
+static PyLongObject *x_divrem
+    (PyLongObject *, PyLongObject *, PyLongObject **);
+static PyObject *long_long(PyObject *v);
+
+/* Int division with remainder, top-level routine */
+
+static int
+long_divrem(PyLongObject *a, PyLongObject *b,
+            PyLongObject **pdiv, PyLongObject **prem)
+{
+    Py_ssize_t size_a = Py_ABS(Py_SIZE(a)), size_b = Py_ABS(Py_SIZE(b));
+    PyLongObject *z;
+
+    if (size_b == 0) {
+        PyErr_SetString(PyExc_ZeroDivisionError,
+                        "integer division or modulo by zero");
+        return -1;
+    }
+    if (size_a < size_b ||
+        (size_a == size_b &&
+         a->ob_digit[size_a-1] < b->ob_digit[size_b-1])) {
+        /* |a| < |b|. */
+        *prem = (PyLongObject *)long_long((PyObject *)a);
+        if (*prem == NULL) {
+            return -1;
+        }
+        PyObject *zero = _PyLong_GetZero();
+        Py_INCREF(zero);
+        *pdiv = (PyLongObject*)zero;
+        return 0;
+    }
+    if (size_b == 1) {
+        digit rem = 0;
+        z = divrem1(a, b->ob_digit[0], &rem);
+        if (z == NULL)
+            return -1;
+        *prem = (PyLongObject *) PyLong_FromLong((long)rem);
+        if (*prem == NULL) {
+            Py_DECREF(z);
+            return -1;
+        }
+    }
+    else {
+        z = x_divrem(a, b, prem);
+        if (z == NULL)
+            return -1;
+    }
+    /* Set the signs.
+       The quotient z has the sign of a*b;
+       the remainder r has the sign of a,
+       so a = b*z + r. */
+    if ((Py_SIZE(a) < 0) != (Py_SIZE(b) < 0)) {
+        _PyLong_Negate(&z);
+        if (z == NULL) {
+            Py_CLEAR(*prem);
+            return -1;
+        }
+    }
+    if (Py_SIZE(a) < 0 && Py_SIZE(*prem) != 0) {
+        _PyLong_Negate(prem);
+        if (*prem == NULL) {
+            Py_DECREF(z);
+            Py_CLEAR(*prem);
+            return -1;
+        }
+    }
+    *pdiv = maybe_small_long(z);
+    return 0;
+}
+
+/* Unsigned int division with remainder -- the algorithm.  The arguments v1
+   and w1 should satisfy 2 <= Py_ABS(Py_SIZE(w1)) <= Py_ABS(Py_SIZE(v1)). */
+
+static PyLongObject *
+x_divrem(PyLongObject *v1, PyLongObject *w1, PyLongObject **prem)
+{
+    PyLongObject *v, *w, *a;
+    Py_ssize_t i, k, size_v, size_w;
+    int d;
+    digit wm1, wm2, carry, q, r, vtop, *v0, *vk, *w0, *ak;
+    twodigits vv;
+    sdigit zhi;
+    stwodigits z;
+
+    /* We follow Knuth [The Art of Computer Programming, Vol. 2 (3rd
+       edn.), section 4.3.1, Algorithm D], except that we don't explicitly
+       handle the special case when the initial estimate q for a quotient
+       digit is >= PyLong_BASE: the max value for q is PyLong_BASE+1, and
+       that won't overflow a digit. */
+
+    /* allocate space; w will also be used to hold the final remainder */
+    size_v = Py_ABS(Py_SIZE(v1));
+    size_w = Py_ABS(Py_SIZE(w1));
+    assert(size_v >= size_w && size_w >= 2); /* Assert checks by div() */
+    v = _PyLong_New(size_v+1);
+    if (v == NULL) {
+        *prem = NULL;
+        return NULL;
+    }
+    w = _PyLong_New(size_w);
+    if (w == NULL) {
+        Py_DECREF(v);
+        *prem = NULL;
+        return NULL;
+    }
+
+    /* normalize: shift w1 left so that its top digit is >= PyLong_BASE/2.
+       shift v1 left by the same amount.  Results go into w and v. */
+    d = PyLong_SHIFT - bit_length_digit(w1->ob_digit[size_w-1]);
+    carry = v_lshift(w->ob_digit, w1->ob_digit, size_w, d);
+    assert(carry == 0);
+    carry = v_lshift(v->ob_digit, v1->ob_digit, size_v, d);
+    if (carry != 0 || v->ob_digit[size_v-1] >= w->ob_digit[size_w-1]) {
+        v->ob_digit[size_v] = carry;
+        size_v++;
+    }
+
+    /* Now v->ob_digit[size_v-1] < w->ob_digit[size_w-1], so quotient has
+       at most (and usually exactly) k = size_v - size_w digits. */
+    k = size_v - size_w;
+    assert(k >= 0);
+    a = _PyLong_New(k);
+    if (a == NULL) {
+        Py_DECREF(w);
+        Py_DECREF(v);
+        *prem = NULL;
+        return NULL;
+    }
+    v0 = v->ob_digit;
+    w0 = w->ob_digit;
+    wm1 = w0[size_w-1];
+    wm2 = w0[size_w-2];
+    for (vk = v0+k, ak = a->ob_digit + k; vk-- > v0;) {
+        /* inner loop: divide vk[0:size_w+1] by w0[0:size_w], giving
+           single-digit quotient q, remainder in vk[0:size_w]. */
+
+        SIGCHECK({
+                Py_DECREF(a);
+                Py_DECREF(w);
+                Py_DECREF(v);
+                *prem = NULL;
+                return NULL;
+            });
+
+        /* estimate quotient digit q; may overestimate by 1 (rare) */
+        vtop = vk[size_w];
+        assert(vtop <= wm1);
+        vv = ((twodigits)vtop << PyLong_SHIFT) | vk[size_w-1];
+        q = (digit)(vv / wm1);
+        r = (digit)(vv - (twodigits)wm1 * q); /* r = vv % wm1 */
+        while ((twodigits)wm2 * q > (((twodigits)r << PyLong_SHIFT)
+                                     | vk[size_w-2])) {
+            --q;
+            r += wm1;
+            if (r >= PyLong_BASE)
+                break;
+        }
+        assert(q <= PyLong_BASE);
+
+        /* subtract q*w0[0:size_w] from vk[0:size_w+1] */
+        zhi = 0;
+        for (i = 0; i < size_w; ++i) {
+            /* invariants: -PyLong_BASE <= -q <= zhi <= 0;
+               -PyLong_BASE * q <= z < PyLong_BASE */
+            z = (sdigit)vk[i] + zhi -
+                (stwodigits)q * (stwodigits)w0[i];
+            vk[i] = (digit)z & PyLong_MASK;
+            zhi = (sdigit)Py_ARITHMETIC_RIGHT_SHIFT(stwodigits,
+                                                    z, PyLong_SHIFT);
+        }
+
+        /* add w back if q was too large (this branch taken rarely) */
+        assert((sdigit)vtop + zhi == -1 || (sdigit)vtop + zhi == 0);
+        if ((sdigit)vtop + zhi < 0) {
+            carry = 0;
+            for (i = 0; i < size_w; ++i) {
+                carry += vk[i] + w0[i];
+                vk[i] = carry & PyLong_MASK;
+                carry >>= PyLong_SHIFT;
+            }
+            --q;
+        }
+
+        /* store quotient digit */
+        assert(q < PyLong_BASE);
+        *--ak = q;
+    }
+
+    /* unshift remainder; we reuse w to store the result */
+    carry = v_rshift(w0, v0, size_w, d);
+    assert(carry==0);
+    Py_DECREF(v);
+
+    *prem = long_normalize(w);
+    return long_normalize(a);
+}
+
+/* For a nonzero PyLong a, express a in the form x * 2**e, with 0.5 <=
+   abs(x) < 1.0 and e >= 0; return x and put e in *e.  Here x is
+   rounded to DBL_MANT_DIG significant bits using round-half-to-even.
+   If a == 0, return 0.0 and set *e = 0.  If the resulting exponent
+   e is larger than PY_SSIZE_T_MAX, raise OverflowError and return
+   -1.0. */
+
+/* attempt to define 2.0**DBL_MANT_DIG as a compile-time constant */
+#if DBL_MANT_DIG == 53
+#define EXP2_DBL_MANT_DIG 9007199254740992.0
+#else
+#define EXP2_DBL_MANT_DIG (ldexp(1.0, DBL_MANT_DIG))
+#endif
+
+double
+_PyLong_Frexp(PyLongObject *a, Py_ssize_t *e)
+{
+    Py_ssize_t a_size, a_bits, shift_digits, shift_bits, x_size;
+    /* See below for why x_digits is always large enough. */
+    digit rem;
+    digit x_digits[2 + (DBL_MANT_DIG + 1) / PyLong_SHIFT] = {0,};
+    double dx;
+    /* Correction term for round-half-to-even rounding.  For a digit x,
+       "x + half_even_correction[x & 7]" gives x rounded to the nearest
+       multiple of 4, rounding ties to a multiple of 8. */
+    static const int half_even_correction[8] = {0, -1, -2, 1, 0, -1, 2, 1};
+
+    a_size = Py_ABS(Py_SIZE(a));
+    if (a_size == 0) {
+        /* Special case for 0: significand 0.0, exponent 0. */
+        *e = 0;
+        return 0.0;
+    }
+    a_bits = bit_length_digit(a->ob_digit[a_size-1]);
+    /* The following is an overflow-free version of the check
+       "if ((a_size - 1) * PyLong_SHIFT + a_bits > PY_SSIZE_T_MAX) ..." */
+    if (a_size >= (PY_SSIZE_T_MAX - 1) / PyLong_SHIFT + 1 &&
+        (a_size > (PY_SSIZE_T_MAX - 1) / PyLong_SHIFT + 1 ||
+         a_bits > (PY_SSIZE_T_MAX - 1) % PyLong_SHIFT + 1))
+        goto overflow;
+    a_bits = (a_size - 1) * PyLong_SHIFT + a_bits;
+
+    /* Shift the first DBL_MANT_DIG + 2 bits of a into x_digits[0:x_size]
+       (shifting left if a_bits <= DBL_MANT_DIG + 2).
+
+       Number of digits needed for result: write // for floor division.
+       Then if shifting left, we end up using
+
+         1 + a_size + (DBL_MANT_DIG + 2 - a_bits) // PyLong_SHIFT
+
+       digits.  If shifting right, we use
+
+         a_size - (a_bits - DBL_MANT_DIG - 2) // PyLong_SHIFT
+
+       digits.  Using a_size = 1 + (a_bits - 1) // PyLong_SHIFT along with
+       the inequalities
+
+         m // PyLong_SHIFT + n // PyLong_SHIFT <= (m + n) // PyLong_SHIFT
+         m // PyLong_SHIFT - n // PyLong_SHIFT <=
+                                          1 + (m - n - 1) // PyLong_SHIFT,
+
+       valid for any integers m and n, we find that x_size satisfies
+
+         x_size <= 2 + (DBL_MANT_DIG + 1) // PyLong_SHIFT
+
+       in both cases.
+    */
+    if (a_bits <= DBL_MANT_DIG + 2) {
+        shift_digits = (DBL_MANT_DIG + 2 - a_bits) / PyLong_SHIFT;
+        shift_bits = (DBL_MANT_DIG + 2 - a_bits) % PyLong_SHIFT;
+        x_size = shift_digits;
+        rem = v_lshift(x_digits + x_size, a->ob_digit, a_size,
+                       (int)shift_bits);
+        x_size += a_size;
+        x_digits[x_size++] = rem;
+    }
+    else {
+        shift_digits = (a_bits - DBL_MANT_DIG - 2) / PyLong_SHIFT;
+        shift_bits = (a_bits - DBL_MANT_DIG - 2) % PyLong_SHIFT;
+        rem = v_rshift(x_digits, a->ob_digit + shift_digits,
+                       a_size - shift_digits, (int)shift_bits);
+        x_size = a_size - shift_digits;
+        /* For correct rounding below, we need the least significant
+           bit of x to be 'sticky' for this shift: if any of the bits
+           shifted out was nonzero, we set the least significant bit
+           of x. */
+        if (rem)
+            x_digits[0] |= 1;
+        else
+            while (shift_digits > 0)
+                if (a->ob_digit[--shift_digits]) {
+                    x_digits[0] |= 1;
+                    break;
+                }
+    }
+    assert(1 <= x_size && x_size <= (Py_ssize_t)Py_ARRAY_LENGTH(x_digits));
+
+    /* Round, and convert to double. */
+    x_digits[0] += half_even_correction[x_digits[0] & 7];
+    dx = x_digits[--x_size];
+    while (x_size > 0)
+        dx = dx * PyLong_BASE + x_digits[--x_size];
+
+    /* Rescale;  make correction if result is 1.0. */
+    dx /= 4.0 * EXP2_DBL_MANT_DIG;
+    if (dx == 1.0) {
+        if (a_bits == PY_SSIZE_T_MAX)
+            goto overflow;
+        dx = 0.5;
+        a_bits += 1;
+    }
+
+    *e = a_bits;
+    return Py_SIZE(a) < 0 ? -dx : dx;
+
+  overflow:
+    /* exponent > PY_SSIZE_T_MAX */
+    PyErr_SetString(PyExc_OverflowError,
+                    "huge integer: number of bits overflows a Py_ssize_t");
+    *e = 0;
+    return -1.0;
+}
+
+/* Get a C double from an int object.  Rounds to the nearest double,
+   using the round-half-to-even rule in the case of a tie. */
+
+double
+PyLong_AsDouble(PyObject *v)
+{
+    Py_ssize_t exponent;
+    double x;
+
+    if (v == NULL) {
+        PyErr_BadInternalCall();
+        return -1.0;
+    }
+    if (!PyLong_Check(v)) {
+        PyErr_SetString(PyExc_TypeError, "an integer is required");
+        return -1.0;
+    }
+    if (IS_MEDIUM_VALUE(v)) {
+        /* Fast path; single digit long (31 bits) will cast safely
+           to double.  This improves performance of FP/long operations
+           by 20%.
+        */
+        return (double)medium_value((PyLongObject *)v);
+    }
+    x = _PyLong_Frexp((PyLongObject *)v, &exponent);
+    if ((x == -1.0 && PyErr_Occurred()) || exponent > DBL_MAX_EXP) {
+        PyErr_SetString(PyExc_OverflowError,
+                        "int too large to convert to float");
+        return -1.0;
+    }
+    return ldexp(x, (int)exponent);
+}
+
 /* Methods */
 
 /* if a < b, return a negative number
@@ -3155,8 +3166,7 @@ x_sub(PyLongObject* a, PyLongObject* b) {
     return maybe_small_long(long_normalize(z));
 }
 
-
-static PyObject*
+PyObject*
 long_add(PyLongObject* a, PyLongObject* b) {
 
     PyLongObject * z;
@@ -3164,8 +3174,7 @@ long_add(PyLongObject* a, PyLongObject* b) {
     CHECK_BINOP(a, b);
 
     if (IS_MEDIUM_VALUE(a) && IS_MEDIUM_VALUE(b)) {
-PyObject* fuck = _PyLong_FromSTwoDigits(medium_value(a) + medium_value(b));
-    return fuck;
+        return _PyLong_FromSTwoDigits(medium_value(a) + medium_value(b));
     }
     if (Py_SIZE(a) < 0) {
         if (Py_SIZE(b) < 0) {
@@ -3186,11 +3195,17 @@ PyObject* fuck = _PyLong_FromSTwoDigits(medium_value(a) + medium_value(b));
         else
             z = x_add(a, b);
     }
-    return (PyObject*)
-            z;
+    return (PyObject*) z;
 }
 
-static PyObject*
+PyObject* long_add_direct(PyLongObject* a, PyLongObject* b) {
+    PyObject* rv = long_add(a, b);
+    Py_DECREF(b);
+    Py_DECREF(a);
+    return rv;
+}
+
+PyObject*
 long_sub(PyLongObject* a, PyLongObject* b) {
     PyLongObject * z;
 
@@ -3215,306 +3230,312 @@ long_sub(PyLongObject* a, PyLongObject* b) {
         else
             z = x_sub(a, b);
     }
-    return (PyObject*)
-            z;
+    return (PyObject*) z;
 }
 
-///* Grade school multiplication, ignoring the signs.
-// * Returns the absolute value of the product, or NULL if error.
-// */
-//static PyLongObject *
-//x_mul(PyLongObject *a, PyLongObject *b)
-//{
-//    PyLongObject *z;
-//    Py_ssize_t size_a = Py_ABS(Py_SIZE(a));
-//    Py_ssize_t size_b = Py_ABS(Py_SIZE(b));
-//    Py_ssize_t i;
-//
-//    z = _PyLong_New(size_a + size_b);
-//    if (z == NULL)
-//        return NULL;
-//
-//    memset(z->ob_digit, 0, Py_SIZE(z) * sizeof(digit));
-//    if (a == b) {
-//        /* Efficient squaring per HAC, Algorithm 14.16:
-//         * http://www.cacr.math.uwaterloo.ca/hac/about/chap14.pdf
-//         * Gives slightly less than a 2x speedup when a == b,
-//         * via exploiting that each entry in the multiplication
-//         * pyramid appears twice (except for the size_a squares).
-//         */
-//        for (i = 0; i < size_a; ++i) {
-//            twodigits carry;
-//            twodigits f = a->ob_digit[i];
-//            digit *pz = z->ob_digit + (i << 1);
-//            digit *pa = a->ob_digit + i + 1;
-//            digit *paend = a->ob_digit + size_a;
-//
-//            SIGCHECK({
-//                    Py_DECREF(z);
-//                    return NULL;
-//                });
-//
-//            carry = *pz + f * f;
-//            *pz++ = (digit)(carry & PyLong_MASK);
-//            carry >>= PyLong_SHIFT;
-//            assert(carry <= PyLong_MASK);
-//
-//            /* Now f is added in twice in each column of the
-//             * pyramid it appears.  Same as adding f<<1 once.
-//             */
-//            f <<= 1;
-//            while (pa < paend) {
-//                carry += *pz + *pa++ * f;
-//                *pz++ = (digit)(carry & PyLong_MASK);
-//                carry >>= PyLong_SHIFT;
-//                assert(carry <= (PyLong_MASK << 1));
-//            }
-//            if (carry) {
-//                carry += *pz;
-//                *pz++ = (digit)(carry & PyLong_MASK);
-//                carry >>= PyLong_SHIFT;
-//            }
-//            if (carry)
-//                *pz += (digit)(carry & PyLong_MASK);
-//            assert((carry >> PyLong_SHIFT) == 0);
-//        }
-//    }
-//    else {      /* a is not the same as b -- gradeschool int mult */
-//        for (i = 0; i < size_a; ++i) {
-//            twodigits carry = 0;
-//            twodigits f = a->ob_digit[i];
-//            digit *pz = z->ob_digit + i;
-//            digit *pb = b->ob_digit;
-//            digit *pbend = b->ob_digit + size_b;
-//
-//            SIGCHECK({
-//                    Py_DECREF(z);
-//                    return NULL;
-//                });
-//
-//            while (pb < pbend) {
-//                carry += *pz + *pb++ * f;
-//                *pz++ = (digit)(carry & PyLong_MASK);
-//                carry >>= PyLong_SHIFT;
-//                assert(carry <= PyLong_MASK);
-//            }
-//            if (carry)
-//                *pz += (digit)(carry & PyLong_MASK);
-//            assert((carry >> PyLong_SHIFT) == 0);
-//        }
-//    }
-//    return long_normalize(z);
-//}
-//
-///* A helper for Karatsuba multiplication (k_mul).
-//   Takes an int "n" and an integer "size" representing the place to
-//   split, and sets low and high such that abs(n) == (high << size) + low,
-//   viewing the shift as being by digits.  The sign bit is ignored, and
-//   the return values are >= 0.
-//   Returns 0 on success, -1 on failure.
-//*/
-//static int
-//kmul_split(PyLongObject *n,
-//           Py_ssize_t size,
-//           PyLongObject **high,
-//           PyLongObject **low)
-//{
-//    PyLongObject *hi, *lo;
-//    Py_ssize_t size_lo, size_hi;
-//    const Py_ssize_t size_n = Py_ABS(Py_SIZE(n));
-//
-//    size_lo = Py_MIN(size_n, size);
-//    size_hi = size_n - size_lo;
-//
-//    if ((hi = _PyLong_New(size_hi)) == NULL)
-//        return -1;
-//    if ((lo = _PyLong_New(size_lo)) == NULL) {
-//        Py_DECREF(hi);
-//        return -1;
-//    }
-//
-//    memcpy(lo->ob_digit, n->ob_digit, size_lo * sizeof(digit));
-//    memcpy(hi->ob_digit, n->ob_digit + size_lo, size_hi * sizeof(digit));
-//
-//    *high = long_normalize(hi);
-//    *low = long_normalize(lo);
-//    return 0;
-//}
-//
-//static PyLongObject *k_lopsided_mul(PyLongObject *a, PyLongObject *b);
-//
-///* Karatsuba multiplication.  Ignores the input signs, and returns the
-// * absolute value of the product (or NULL if error).
-// * See Knuth Vol. 2 Chapter 4.3.3 (Pp. 294-295).
-// */
-//static PyLongObject *
-//k_mul(PyLongObject *a, PyLongObject *b)
-//{
-//    Py_ssize_t asize = Py_ABS(Py_SIZE(a));
-//    Py_ssize_t bsize = Py_ABS(Py_SIZE(b));
-//    PyLongObject *ah = NULL;
-//    PyLongObject *al = NULL;
-//    PyLongObject *bh = NULL;
-//    PyLongObject *bl = NULL;
-//    PyLongObject *ret = NULL;
-//    PyLongObject *t1, *t2, *t3;
-//    Py_ssize_t shift;           /* the number of digits we split off */
-//    Py_ssize_t i;
-//
-//    /* (ah*X+al)(bh*X+bl) = ah*bh*X*X + (ah*bl + al*bh)*X + al*bl
-//     * Let k = (ah+al)*(bh+bl) = ah*bl + al*bh  + ah*bh + al*bl
-//     * Then the original product is
-//     *     ah*bh*X*X + (k - ah*bh - al*bl)*X + al*bl
-//     * By picking X to be a power of 2, "*X" is just shifting, and it's
-//     * been reduced to 3 multiplies on numbers half the size.
-//     */
-//
-//    /* We want to split based on the larger number; fiddle so that b
-//     * is largest.
-//     */
-//    if (asize > bsize) {
-//        t1 = a;
-//        a = b;
-//        b = t1;
-//
-//        i = asize;
-//        asize = bsize;
-//        bsize = i;
-//    }
-//
-//    /* Use gradeschool math when either number is too small. */
-//    i = a == b ? KARATSUBA_SQUARE_CUTOFF : KARATSUBA_CUTOFF;
-//    if (asize <= i) {
-//        if (asize == 0)
-//            return (PyLongObject *)PyLong_FromLong(0);
-//        else
-//            return x_mul(a, b);
-//    }
-//
-//    /* If a is small compared to b, splitting on b gives a degenerate
-//     * case with ah==0, and Karatsuba may be (even much) less efficient
-//     * than "grade school" then.  However, we can still win, by viewing
-//     * b as a string of "big digits", each of width a->ob_size.  That
-//     * leads to a sequence of balanced calls to k_mul.
-//     */
-//    if (2 * asize <= bsize)
-//        return k_lopsided_mul(a, b);
-//
-//    /* Split a & b into hi & lo pieces. */
-//    shift = bsize >> 1;
-//    if (kmul_split(a, shift, &ah, &al) < 0) goto fail;
-//    assert(Py_SIZE(ah) > 0);            /* the split isn't degenerate */
-//
-//    if (a == b) {
-//        bh = ah;
-//        bl = al;
-//        Py_INCREF(bh);
-//        Py_INCREF(bl);
-//    }
-//    else if (kmul_split(b, shift, &bh, &bl) < 0) goto fail;
-//
-//    /* The plan:
-//     * 1. Allocate result space (asize + bsize digits:  that's always
-//     *    enough).
-//     * 2. Compute ah*bh, and copy into result at 2*shift.
-//     * 3. Compute al*bl, and copy into result at 0.  Note that this
-//     *    can't overlap with #2.
-//     * 4. Subtract al*bl from the result, starting at shift.  This may
-//     *    underflow (borrow out of the high digit), but we don't care:
-//     *    we're effectively doing unsigned arithmetic mod
-//     *    BASE**(sizea + sizeb), and so long as the *final* result fits,
-//     *    borrows and carries out of the high digit can be ignored.
-//     * 5. Subtract ah*bh from the result, starting at shift.
-//     * 6. Compute (ah+al)*(bh+bl), and add it into the result starting
-//     *    at shift.
-//     */
-//
-//    /* 1. Allocate result space. */
-//    ret = _PyLong_New(asize + bsize);
-//    if (ret == NULL) goto fail;
-//#ifdef Py_DEBUG
-//    /* Fill with trash, to catch reference to uninitialized digits. */
-//    memset(ret->ob_digit, 0xDF, Py_SIZE(ret) * sizeof(digit));
-//#endif
-//
-//    /* 2. t1 <- ah*bh, and copy into high digits of result. */
-//    if ((t1 = k_mul(ah, bh)) == NULL) goto fail;
-//    assert(Py_SIZE(t1) >= 0);
-//    assert(2*shift + Py_SIZE(t1) <= Py_SIZE(ret));
-//    memcpy(ret->ob_digit + 2*shift, t1->ob_digit,
-//           Py_SIZE(t1) * sizeof(digit));
-//
-//    /* Zero-out the digits higher than the ah*bh copy. */
-//    i = Py_SIZE(ret) - 2*shift - Py_SIZE(t1);
-//    if (i)
-//        memset(ret->ob_digit + 2*shift + Py_SIZE(t1), 0,
-//               i * sizeof(digit));
-//
-//    /* 3. t2 <- al*bl, and copy into the low digits. */
-//    if ((t2 = k_mul(al, bl)) == NULL) {
-//        Py_DECREF(t1);
-//        goto fail;
-//    }
-//    assert(Py_SIZE(t2) >= 0);
-//    assert(Py_SIZE(t2) <= 2*shift); /* no overlap with high digits */
-//    memcpy(ret->ob_digit, t2->ob_digit, Py_SIZE(t2) * sizeof(digit));
-//
-//    /* Zero out remaining digits. */
-//    i = 2*shift - Py_SIZE(t2);          /* number of uninitialized digits */
-//    if (i)
-//        memset(ret->ob_digit + Py_SIZE(t2), 0, i * sizeof(digit));
-//
-//    /* 4 & 5. Subtract ah*bh (t1) and al*bl (t2).  We do al*bl first
-//     * because it's fresher in cache.
-//     */
-//    i = Py_SIZE(ret) - shift;  /* # digits after shift */
-//    (void)v_isub(ret->ob_digit + shift, i, t2->ob_digit, Py_SIZE(t2));
-//    Py_DECREF(t2);
-//
-//    (void)v_isub(ret->ob_digit + shift, i, t1->ob_digit, Py_SIZE(t1));
-//    Py_DECREF(t1);
-//
-//    /* 6. t3 <- (ah+al)(bh+bl), and add into result. */
-//    if ((t1 = x_add(ah, al)) == NULL) goto fail;
-//    Py_DECREF(ah);
-//    Py_DECREF(al);
-//    ah = al = NULL;
-//
-//    if (a == b) {
-//        t2 = t1;
-//        Py_INCREF(t2);
-//    }
-//    else if ((t2 = x_add(bh, bl)) == NULL) {
-//        Py_DECREF(t1);
-//        goto fail;
-//    }
-//    Py_DECREF(bh);
-//    Py_DECREF(bl);
-//    bh = bl = NULL;
-//
-//    t3 = k_mul(t1, t2);
-//    Py_DECREF(t1);
-//    Py_DECREF(t2);
-//    if (t3 == NULL) goto fail;
-//    assert(Py_SIZE(t3) >= 0);
-//
-//    /* Add t3.  It's not obvious why we can't run out of room here.
-//     * See the (*) comment after this function.
-//     */
-//    (void)v_iadd(ret->ob_digit + shift, i, t3->ob_digit, Py_SIZE(t3));
-//    Py_DECREF(t3);
-//
-//    return long_normalize(ret);
-//
-//  fail:
-//    Py_XDECREF(ret);
-//    Py_XDECREF(ah);
-//    Py_XDECREF(al);
-//    Py_XDECREF(bh);
-//    Py_XDECREF(bl);
-//    return NULL;
-//}
-//
+PyObject* long_sub_direct(PyLongObject* a, PyLongObject* b) {
+    PyObject* rv = long_sub(a, b);
+    Py_DECREF(b);
+    Py_DECREF(a);
+    return rv;
+}
+
+/* Grade school multiplication, ignoring the signs.
+ * Returns the absolute value of the product, or NULL if error.
+ */
+static PyLongObject *
+x_mul(PyLongObject *a, PyLongObject *b)
+{
+    PyLongObject *z;
+    Py_ssize_t size_a = Py_ABS(Py_SIZE(a));
+    Py_ssize_t size_b = Py_ABS(Py_SIZE(b));
+    Py_ssize_t i;
+
+    z = _PyLong_New(size_a + size_b);
+    if (z == NULL)
+        return NULL;
+
+    memset(z->ob_digit, 0, Py_SIZE(z) * sizeof(digit));
+    if (a == b) {
+        /* Efficient squaring per HAC, Algorithm 14.16:
+         * http://www.cacr.math.uwaterloo.ca/hac/about/chap14.pdf
+         * Gives slightly less than a 2x speedup when a == b,
+         * via exploiting that each entry in the multiplication
+         * pyramid appears twice (except for the size_a squares).
+         */
+        for (i = 0; i < size_a; ++i) {
+            twodigits carry;
+            twodigits f = a->ob_digit[i];
+            digit *pz = z->ob_digit + (i << 1);
+            digit *pa = a->ob_digit + i + 1;
+            digit *paend = a->ob_digit + size_a;
+
+            SIGCHECK({
+                    Py_DECREF(z);
+                    return NULL;
+                });
+
+            carry = *pz + f * f;
+            *pz++ = (digit)(carry & PyLong_MASK);
+            carry >>= PyLong_SHIFT;
+            assert(carry <= PyLong_MASK);
+
+            /* Now f is added in twice in each column of the
+             * pyramid it appears.  Same as adding f<<1 once.
+             */
+            f <<= 1;
+            while (pa < paend) {
+                carry += *pz + *pa++ * f;
+                *pz++ = (digit)(carry & PyLong_MASK);
+                carry >>= PyLong_SHIFT;
+                assert(carry <= (PyLong_MASK << 1));
+            }
+            if (carry) {
+                carry += *pz;
+                *pz++ = (digit)(carry & PyLong_MASK);
+                carry >>= PyLong_SHIFT;
+            }
+            if (carry)
+                *pz += (digit)(carry & PyLong_MASK);
+            assert((carry >> PyLong_SHIFT) == 0);
+        }
+    }
+    else {      /* a is not the same as b -- gradeschool int mult */
+        for (i = 0; i < size_a; ++i) {
+            twodigits carry = 0;
+            twodigits f = a->ob_digit[i];
+            digit *pz = z->ob_digit + i;
+            digit *pb = b->ob_digit;
+            digit *pbend = b->ob_digit + size_b;
+
+            SIGCHECK({
+                    Py_DECREF(z);
+                    return NULL;
+                });
+
+            while (pb < pbend) {
+                carry += *pz + *pb++ * f;
+                *pz++ = (digit)(carry & PyLong_MASK);
+                carry >>= PyLong_SHIFT;
+                assert(carry <= PyLong_MASK);
+            }
+            if (carry)
+                *pz += (digit)(carry & PyLong_MASK);
+            assert((carry >> PyLong_SHIFT) == 0);
+        }
+    }
+    return long_normalize(z);
+}
+
+/* A helper for Karatsuba multiplication (k_mul).
+   Takes an int "n" and an integer "size" representing the place to
+   split, and sets low and high such that abs(n) == (high << size) + low,
+   viewing the shift as being by digits.  The sign bit is ignored, and
+   the return values are >= 0.
+   Returns 0 on success, -1 on failure.
+*/
+static int
+kmul_split(PyLongObject *n,
+           Py_ssize_t size,
+           PyLongObject **high,
+           PyLongObject **low)
+{
+    PyLongObject *hi, *lo;
+    Py_ssize_t size_lo, size_hi;
+    const Py_ssize_t size_n = Py_ABS(Py_SIZE(n));
+
+    size_lo = Py_MIN(size_n, size);
+    size_hi = size_n - size_lo;
+
+    if ((hi = _PyLong_New(size_hi)) == NULL)
+        return -1;
+    if ((lo = _PyLong_New(size_lo)) == NULL) {
+        Py_DECREF(hi);
+        return -1;
+    }
+
+    memcpy(lo->ob_digit, n->ob_digit, size_lo * sizeof(digit));
+    memcpy(hi->ob_digit, n->ob_digit + size_lo, size_hi * sizeof(digit));
+
+    *high = long_normalize(hi);
+    *low = long_normalize(lo);
+    return 0;
+}
+
+static PyLongObject *k_lopsided_mul(PyLongObject *a, PyLongObject *b);
+
+/* Karatsuba multiplication.  Ignores the input signs, and returns the
+ * absolute value of the product (or NULL if error).
+ * See Knuth Vol. 2 Chapter 4.3.3 (Pp. 294-295).
+ */
+static PyLongObject *
+k_mul(PyLongObject *a, PyLongObject *b)
+{
+    Py_ssize_t asize = Py_ABS(Py_SIZE(a));
+    Py_ssize_t bsize = Py_ABS(Py_SIZE(b));
+    PyLongObject *ah = NULL;
+    PyLongObject *al = NULL;
+    PyLongObject *bh = NULL;
+    PyLongObject *bl = NULL;
+    PyLongObject *ret = NULL;
+    PyLongObject *t1, *t2, *t3;
+    Py_ssize_t shift;           /* the number of digits we split off */
+    Py_ssize_t i;
+
+    /* (ah*X+al)(bh*X+bl) = ah*bh*X*X + (ah*bl + al*bh)*X + al*bl
+     * Let k = (ah+al)*(bh+bl) = ah*bl + al*bh  + ah*bh + al*bl
+     * Then the original product is
+     *     ah*bh*X*X + (k - ah*bh - al*bl)*X + al*bl
+     * By picking X to be a power of 2, "*X" is just shifting, and it's
+     * been reduced to 3 multiplies on numbers half the size.
+     */
+
+    /* We want to split based on the larger number; fiddle so that b
+     * is largest.
+     */
+    if (asize > bsize) {
+        t1 = a;
+        a = b;
+        b = t1;
+
+        i = asize;
+        asize = bsize;
+        bsize = i;
+    }
+
+    /* Use gradeschool math when either number is too small. */
+    i = a == b ? KARATSUBA_SQUARE_CUTOFF : KARATSUBA_CUTOFF;
+    if (asize <= i) {
+        if (asize == 0)
+            return (PyLongObject *)PyLong_FromLong(0);
+        else
+            return x_mul(a, b);
+    }
+
+    /* If a is small compared to b, splitting on b gives a degenerate
+     * case with ah==0, and Karatsuba may be (even much) less efficient
+     * than "grade school" then.  However, we can still win, by viewing
+     * b as a string of "big digits", each of width a->ob_size.  That
+     * leads to a sequence of balanced calls to k_mul.
+     */
+    if (2 * asize <= bsize)
+        return k_lopsided_mul(a, b);
+
+    /* Split a & b into hi & lo pieces. */
+    shift = bsize >> 1;
+    if (kmul_split(a, shift, &ah, &al) < 0) goto fail;
+    assert(Py_SIZE(ah) > 0);            /* the split isn't degenerate */
+
+    if (a == b) {
+        bh = ah;
+        bl = al;
+        Py_INCREF(bh);
+        Py_INCREF(bl);
+    }
+    else if (kmul_split(b, shift, &bh, &bl) < 0) goto fail;
+
+    /* The plan:
+     * 1. Allocate result space (asize + bsize digits:  that's always
+     *    enough).
+     * 2. Compute ah*bh, and copy into result at 2*shift.
+     * 3. Compute al*bl, and copy into result at 0.  Note that this
+     *    can't overlap with #2.
+     * 4. Subtract al*bl from the result, starting at shift.  This may
+     *    underflow (borrow out of the high digit), but we don't care:
+     *    we're effectively doing unsigned arithmetic mod
+     *    BASE**(sizea + sizeb), and so long as the *final* result fits,
+     *    borrows and carries out of the high digit can be ignored.
+     * 5. Subtract ah*bh from the result, starting at shift.
+     * 6. Compute (ah+al)*(bh+bl), and add it into the result starting
+     *    at shift.
+     */
+
+    /* 1. Allocate result space. */
+    ret = _PyLong_New(asize + bsize);
+    if (ret == NULL) goto fail;
+#ifdef Py_DEBUG
+    /* Fill with trash, to catch reference to uninitialized digits. */
+    memset(ret->ob_digit, 0xDF, Py_SIZE(ret) * sizeof(digit));
+#endif
+
+    /* 2. t1 <- ah*bh, and copy into high digits of result. */
+    if ((t1 = k_mul(ah, bh)) == NULL) goto fail;
+    assert(Py_SIZE(t1) >= 0);
+    assert(2*shift + Py_SIZE(t1) <= Py_SIZE(ret));
+    memcpy(ret->ob_digit + 2*shift, t1->ob_digit,
+           Py_SIZE(t1) * sizeof(digit));
+
+    /* Zero-out the digits higher than the ah*bh copy. */
+    i = Py_SIZE(ret) - 2*shift - Py_SIZE(t1);
+    if (i)
+        memset(ret->ob_digit + 2*shift + Py_SIZE(t1), 0,
+               i * sizeof(digit));
+
+    /* 3. t2 <- al*bl, and copy into the low digits. */
+    if ((t2 = k_mul(al, bl)) == NULL) {
+        Py_DECREF(t1);
+        goto fail;
+    }
+    assert(Py_SIZE(t2) >= 0);
+    assert(Py_SIZE(t2) <= 2*shift); /* no overlap with high digits */
+    memcpy(ret->ob_digit, t2->ob_digit, Py_SIZE(t2) * sizeof(digit));
+
+    /* Zero out remaining digits. */
+    i = 2*shift - Py_SIZE(t2);          /* number of uninitialized digits */
+    if (i)
+        memset(ret->ob_digit + Py_SIZE(t2), 0, i * sizeof(digit));
+
+    /* 4 & 5. Subtract ah*bh (t1) and al*bl (t2).  We do al*bl first
+     * because it's fresher in cache.
+     */
+    i = Py_SIZE(ret) - shift;  /* # digits after shift */
+    (void)v_isub(ret->ob_digit + shift, i, t2->ob_digit, Py_SIZE(t2));
+    Py_DECREF(t2);
+
+    (void)v_isub(ret->ob_digit + shift, i, t1->ob_digit, Py_SIZE(t1));
+    Py_DECREF(t1);
+
+    /* 6. t3 <- (ah+al)(bh+bl), and add into result. */
+    if ((t1 = x_add(ah, al)) == NULL) goto fail;
+    Py_DECREF(ah);
+    Py_DECREF(al);
+    ah = al = NULL;
+
+    if (a == b) {
+        t2 = t1;
+        Py_INCREF(t2);
+    }
+    else if ((t2 = x_add(bh, bl)) == NULL) {
+        Py_DECREF(t1);
+        goto fail;
+    }
+    Py_DECREF(bh);
+    Py_DECREF(bl);
+    bh = bl = NULL;
+
+    t3 = k_mul(t1, t2);
+    Py_DECREF(t1);
+    Py_DECREF(t2);
+    if (t3 == NULL) goto fail;
+    assert(Py_SIZE(t3) >= 0);
+
+    /* Add t3.  It's not obvious why we can't run out of room here.
+     * See the (*) comment after this function.
+     */
+    (void)v_iadd(ret->ob_digit + shift, i, t3->ob_digit, Py_SIZE(t3));
+    Py_DECREF(t3);
+
+    return long_normalize(ret);
+
+  fail:
+    Py_XDECREF(ret);
+    Py_XDECREF(ah);
+    Py_XDECREF(al);
+    Py_XDECREF(bh);
+    Py_XDECREF(bl);
+    return NULL;
+}
+
 ///* (*) Why adding t3 can't "run out of room" above.
 //
 //Let f(x) mean the floor of x and c(x) mean the ceiling of x.  Some facts
@@ -3559,1278 +3580,1279 @@ long_sub(PyLongObject* a, PyLongObject* b) {
 //clearly >= each of ah*bh and al*bl, there's always enough room to subtract
 //ah*bh and al*bl too.
 //*/
-//
-///* b has at least twice the digits of a, and a is big enough that Karatsuba
-// * would pay off *if* the inputs had balanced sizes.  View b as a sequence
-// * of slices, each with a->ob_size digits, and multiply the slices by a,
-// * one at a time.  This gives k_mul balanced inputs to work with, and is
-// * also cache-friendly (we compute one double-width slice of the result
-// * at a time, then move on, never backtracking except for the helpful
-// * single-width slice overlap between successive partial sums).
-// */
-//static PyLongObject *
-//k_lopsided_mul(PyLongObject *a, PyLongObject *b)
-//{
-//    const Py_ssize_t asize = Py_ABS(Py_SIZE(a));
-//    Py_ssize_t bsize = Py_ABS(Py_SIZE(b));
-//    Py_ssize_t nbdone;          /* # of b digits already multiplied */
-//    PyLongObject *ret;
-//    PyLongObject *bslice = NULL;
-//
-//    assert(asize > KARATSUBA_CUTOFF);
-//    assert(2 * asize <= bsize);
-//
-//    /* Allocate result space, and zero it out. */
-//    ret = _PyLong_New(asize + bsize);
-//    if (ret == NULL)
-//        return NULL;
-//    memset(ret->ob_digit, 0, Py_SIZE(ret) * sizeof(digit));
-//
-//    /* Successive slices of b are copied into bslice. */
-//    bslice = _PyLong_New(asize);
-//    if (bslice == NULL)
-//        goto fail;
-//
-//    nbdone = 0;
-//    while (bsize > 0) {
-//        PyLongObject *product;
-//        const Py_ssize_t nbtouse = Py_MIN(bsize, asize);
-//
-//        /* Multiply the next slice of b by a. */
-//        memcpy(bslice->ob_digit, b->ob_digit + nbdone,
-//               nbtouse * sizeof(digit));
-//        Py_SET_SIZE(bslice, nbtouse);
-//        product = k_mul(a, bslice);
-//        if (product == NULL)
-//            goto fail;
-//
-//        /* Add into result. */
-//        (void)v_iadd(ret->ob_digit + nbdone, Py_SIZE(ret) - nbdone,
-//                     product->ob_digit, Py_SIZE(product));
-//        Py_DECREF(product);
-//
-//        bsize -= nbtouse;
-//        nbdone += nbtouse;
-//    }
-//
-//    Py_DECREF(bslice);
-//    return long_normalize(ret);
-//
-//  fail:
-//    Py_DECREF(ret);
-//    Py_XDECREF(bslice);
-//    return NULL;
-//}
-//
-//static PyObject *
-//long_mul(PyLongObject *a, PyLongObject *b)
-//{
-//    PyLongObject *z;
-//
-//    CHECK_BINOP(a, b);
-//
-//    /* fast path for single-digit multiplication */
-//    if (IS_MEDIUM_VALUE(a) && IS_MEDIUM_VALUE(b)) {
-//        stwodigits v = medium_value(a) * medium_value(b);
-//        return _PyLong_FromSTwoDigits(v);
-//    }
-//
-//    z = k_mul(a, b);
-//    /* Negate if exactly one of the inputs is negative. */
-//    if (((Py_SIZE(a) ^ Py_SIZE(b)) < 0) && z) {
-//        _PyLong_Negate(&z);
-//        if (z == NULL)
-//            return NULL;
-//    }
-//    return (PyObject *)z;
-//}
-//
-///* Fast modulo division for single-digit longs. */
-//static PyObject *
-//fast_mod(PyLongObject *a, PyLongObject *b)
-//{
-//    sdigit left = a->ob_digit[0];
-//    sdigit right = b->ob_digit[0];
-//    sdigit mod;
-//
-//    assert(Py_ABS(Py_SIZE(a)) == 1);
-//    assert(Py_ABS(Py_SIZE(b)) == 1);
-//
-//    if (Py_SIZE(a) == Py_SIZE(b)) {
-//        /* 'a' and 'b' have the same sign. */
-//        mod = left % right;
-//    }
-//    else {
-//        /* Either 'a' or 'b' is negative. */
-//        mod = right - 1 - (left - 1) % right;
-//    }
-//
-//    return PyLong_FromLong(mod * (sdigit)Py_SIZE(b));
-//}
-//
-///* Fast floor division for single-digit longs. */
-//static PyObject *
-//fast_floor_div(PyLongObject *a, PyLongObject *b)
-//{
-//    sdigit left = a->ob_digit[0];
-//    sdigit right = b->ob_digit[0];
-//    sdigit div;
-//
-//    assert(Py_ABS(Py_SIZE(a)) == 1);
-//    assert(Py_ABS(Py_SIZE(b)) == 1);
-//
-//    if (Py_SIZE(a) == Py_SIZE(b)) {
-//        /* 'a' and 'b' have the same sign. */
-//        div = left / right;
-//    }
-//    else {
-//        /* Either 'a' or 'b' is negative. */
-//        div = -1 - (left - 1) / right;
-//    }
-//
-//    return PyLong_FromLong(div);
-//}
-//
-///* The / and % operators are now defined in terms of divmod().
-//   The expression a mod b has the value a - b*floor(a/b).
-//   The long_divrem function gives the remainder after division of
-//   |a| by |b|, with the sign of a.  This is also expressed
-//   as a - b*trunc(a/b), if trunc truncates towards zero.
-//   Some examples:
-//     a           b      a rem b         a mod b
-//     13          10      3               3
-//    -13          10     -3               7
-//     13         -10      3              -7
-//    -13         -10     -3              -3
-//   So, to get from rem to mod, we have to add b if a and b
-//   have different signs.  We then subtract one from the 'div'
-//   part of the outcome to keep the invariant intact. */
-//
-///* Compute
-// *     *pdiv, *pmod = divmod(v, w)
-// * NULL can be passed for pdiv or pmod, in which case that part of
-// * the result is simply thrown away.  The caller owns a reference to
-// * each of these it requests (does not pass NULL for).
-// */
-//static int
-//l_divmod(PyLongObject *v, PyLongObject *w,
-//         PyLongObject **pdiv, PyLongObject **pmod)
-//{
-//    PyLongObject *div, *mod;
-//
-//    if (Py_ABS(Py_SIZE(v)) == 1 && Py_ABS(Py_SIZE(w)) == 1) {
-//        /* Fast path for single-digit longs */
-//        div = NULL;
-//        if (pdiv != NULL) {
-//            div = (PyLongObject *)fast_floor_div(v, w);
-//            if (div == NULL) {
-//                return -1;
-//            }
-//        }
-//        if (pmod != NULL) {
-//            mod = (PyLongObject *)fast_mod(v, w);
-//            if (mod == NULL) {
-//                Py_XDECREF(div);
-//                return -1;
-//            }
-//            *pmod = mod;
-//        }
-//        if (pdiv != NULL) {
-//            /* We only want to set `*pdiv` when `*pmod` is
-//               set successfully. */
-//            *pdiv = div;
-//        }
-//        return 0;
-//    }
-//    if (long_divrem(v, w, &div, &mod) < 0)
-//        return -1;
-//    if ((Py_SIZE(mod) < 0 && Py_SIZE(w) > 0) ||
-//        (Py_SIZE(mod) > 0 && Py_SIZE(w) < 0)) {
-//        PyLongObject *temp;
-//        temp = (PyLongObject *) long_add(mod, w);
-//        Py_DECREF(mod);
-//        mod = temp;
-//        if (mod == NULL) {
-//            Py_DECREF(div);
-//            return -1;
-//        }
-//        temp = (PyLongObject *) long_sub(div, (PyLongObject *)_PyLong_GetOne());
-//        if (temp == NULL) {
-//            Py_DECREF(mod);
-//            Py_DECREF(div);
-//            return -1;
-//        }
-//        Py_DECREF(div);
-//        div = temp;
-//    }
-//    if (pdiv != NULL)
-//        *pdiv = div;
-//    else
-//        Py_DECREF(div);
-//
-//    if (pmod != NULL)
-//        *pmod = mod;
-//    else
-//        Py_DECREF(mod);
-//
-//    return 0;
-//}
-//
-//static PyObject *
-//long_div(PyObject *a, PyObject *b)
-//{
-//    PyLongObject *div;
-//
-//    CHECK_BINOP(a, b);
-//
-//    if (Py_ABS(Py_SIZE(a)) == 1 && Py_ABS(Py_SIZE(b)) == 1) {
-//        return fast_floor_div((PyLongObject*)a, (PyLongObject*)b);
-//    }
-//
-//    if (l_divmod((PyLongObject*)a, (PyLongObject*)b, &div, NULL) < 0)
-//        div = NULL;
-//    return (PyObject *)div;
-//}
-//
+
+/* b has at least twice the digits of a, and a is big enough that Karatsuba
+ * would pay off *if* the inputs had balanced sizes.  View b as a sequence
+ * of slices, each with a->ob_size digits, and multiply the slices by a,
+ * one at a time.  This gives k_mul balanced inputs to work with, and is
+ * also cache-friendly (we compute one double-width slice of the result
+ * at a time, then move on, never backtracking except for the helpful
+ * single-width slice overlap between successive partial sums).
+ */
+static PyLongObject *
+k_lopsided_mul(PyLongObject *a, PyLongObject *b)
+{
+    const Py_ssize_t asize = Py_ABS(Py_SIZE(a));
+    Py_ssize_t bsize = Py_ABS(Py_SIZE(b));
+    Py_ssize_t nbdone;          /* # of b digits already multiplied */
+    PyLongObject *ret;
+    PyLongObject *bslice = NULL;
+
+    assert(asize > KARATSUBA_CUTOFF);
+    assert(2 * asize <= bsize);
+
+    /* Allocate result space, and zero it out. */
+    ret = _PyLong_New(asize + bsize);
+    if (ret == NULL)
+        return NULL;
+    memset(ret->ob_digit, 0, Py_SIZE(ret) * sizeof(digit));
+
+    /* Successive slices of b are copied into bslice. */
+    bslice = _PyLong_New(asize);
+    if (bslice == NULL)
+        goto fail;
+
+    nbdone = 0;
+    while (bsize > 0) {
+        PyLongObject *product;
+        const Py_ssize_t nbtouse = Py_MIN(bsize, asize);
+
+        /* Multiply the next slice of b by a. */
+        memcpy(bslice->ob_digit, b->ob_digit + nbdone,
+               nbtouse * sizeof(digit));
+        Py_SET_SIZE(bslice, nbtouse);
+        product = k_mul(a, bslice);
+        if (product == NULL)
+            goto fail;
+
+        /* Add into result. */
+        (void)v_iadd(ret->ob_digit + nbdone, Py_SIZE(ret) - nbdone,
+                     product->ob_digit, Py_SIZE(product));
+        Py_DECREF(product);
+
+        bsize -= nbtouse;
+        nbdone += nbtouse;
+    }
+
+    Py_DECREF(bslice);
+    return long_normalize(ret);
+
+  fail:
+    Py_DECREF(ret);
+    Py_XDECREF(bslice);
+    return NULL;
+}
+
+static PyObject *
+long_mul(PyLongObject *a, PyLongObject *b)
+{
+    PyLongObject *z;
+
+    CHECK_BINOP(a, b);
+
+    /* fast path for single-digit multiplication */
+    if (IS_MEDIUM_VALUE(a) && IS_MEDIUM_VALUE(b)) {
+        stwodigits v = medium_value(a) * medium_value(b);
+        return _PyLong_FromSTwoDigits(v);
+    }
+
+    z = k_mul(a, b);
+    /* Negate if exactly one of the inputs is negative. */
+    if (((Py_SIZE(a) ^ Py_SIZE(b)) < 0) && z) {
+        _PyLong_Negate(&z);
+        if (z == NULL)
+            return NULL;
+    }
+    return (PyObject *)z;
+}
+
+/* Fast modulo division for single-digit longs. */
+static PyObject *
+fast_mod(PyLongObject *a, PyLongObject *b)
+{
+    sdigit left = a->ob_digit[0];
+    sdigit right = b->ob_digit[0];
+    sdigit mod;
+
+    assert(Py_ABS(Py_SIZE(a)) == 1);
+    assert(Py_ABS(Py_SIZE(b)) == 1);
+
+    if (Py_SIZE(a) == Py_SIZE(b)) {
+        /* 'a' and 'b' have the same sign. */
+        mod = left % right;
+    }
+    else {
+        /* Either 'a' or 'b' is negative. */
+        mod = right - 1 - (left - 1) % right;
+    }
+
+    return PyLong_FromLong(mod * (sdigit)Py_SIZE(b));
+}
+
+/* Fast floor division for single-digit longs. */
+static PyObject *
+fast_floor_div(PyLongObject *a, PyLongObject *b)
+{
+    sdigit left = a->ob_digit[0];
+    sdigit right = b->ob_digit[0];
+    sdigit div;
+
+    assert(Py_ABS(Py_SIZE(a)) == 1);
+    assert(Py_ABS(Py_SIZE(b)) == 1);
+
+    if (Py_SIZE(a) == Py_SIZE(b)) {
+        /* 'a' and 'b' have the same sign. */
+        div = left / right;
+    }
+    else {
+        /* Either 'a' or 'b' is negative. */
+        div = -1 - (left - 1) / right;
+    }
+
+    return PyLong_FromLong(div);
+}
+
+/* The / and % operators are now defined in terms of divmod().
+   The expression a mod b has the value a - b*floor(a/b).
+   The long_divrem function gives the remainder after division of
+   |a| by |b|, with the sign of a.  This is also expressed
+   as a - b*trunc(a/b), if trunc truncates towards zero.
+   Some examples:
+     a           b      a rem b         a mod b
+     13          10      3               3
+    -13          10     -3               7
+     13         -10      3              -7
+    -13         -10     -3              -3
+   So, to get from rem to mod, we have to add b if a and b
+   have different signs.  We then subtract one from the 'div'
+   part of the outcome to keep the invariant intact. */
+
+/* Compute
+ *     *pdiv, *pmod = divmod(v, w)
+ * NULL can be passed for pdiv or pmod, in which case that part of
+ * the result is simply thrown away.  The caller owns a reference to
+ * each of these it requests (does not pass NULL for).
+ */
+static int
+l_divmod(PyLongObject *v, PyLongObject *w,
+         PyLongObject **pdiv, PyLongObject **pmod)
+{
+    PyLongObject *div, *mod;
+
+    if (Py_ABS(Py_SIZE(v)) == 1 && Py_ABS(Py_SIZE(w)) == 1) {
+        /* Fast path for single-digit longs */
+        div = NULL;
+        if (pdiv != NULL) {
+            div = (PyLongObject *)fast_floor_div(v, w);
+            if (div == NULL) {
+                return -1;
+            }
+        }
+        if (pmod != NULL) {
+            mod = (PyLongObject *)fast_mod(v, w);
+            if (mod == NULL) {
+                Py_XDECREF(div);
+                return -1;
+            }
+            *pmod = mod;
+        }
+        if (pdiv != NULL) {
+            /* We only want to set `*pdiv` when `*pmod` is
+               set successfully. */
+            *pdiv = div;
+        }
+        return 0;
+    }
+    if (long_divrem(v, w, &div, &mod) < 0)
+        return -1;
+    if ((Py_SIZE(mod) < 0 && Py_SIZE(w) > 0) ||
+        (Py_SIZE(mod) > 0 && Py_SIZE(w) < 0)) {
+        PyLongObject *temp;
+        temp = (PyLongObject *) long_add(mod, w);
+        Py_DECREF(mod);
+        mod = temp;
+        if (mod == NULL) {
+            Py_DECREF(div);
+            return -1;
+        }
+        temp = (PyLongObject *) long_sub(div, (PyLongObject *)_PyLong_GetOne());
+        if (temp == NULL) {
+            Py_DECREF(mod);
+            Py_DECREF(div);
+            return -1;
+        }
+        Py_DECREF(div);
+        div = temp;
+    }
+    if (pdiv != NULL)
+        *pdiv = div;
+    else
+        Py_DECREF(div);
+
+    if (pmod != NULL)
+        *pmod = mod;
+    else
+        Py_DECREF(mod);
+
+    return 0;
+}
+
+static PyObject *
+long_div(PyObject *a, PyObject *b)
+{
+    PyLongObject *div;
+
+    CHECK_BINOP(a, b);
+
+    if (Py_ABS(Py_SIZE(a)) == 1 && Py_ABS(Py_SIZE(b)) == 1) {
+        return fast_floor_div((PyLongObject*)a, (PyLongObject*)b);
+    }
+
+    if (l_divmod((PyLongObject*)a, (PyLongObject*)b, &div, NULL) < 0)
+        div = NULL;
+    return (PyObject *)div;
+}
+
 ///* PyLong/PyLong -> float, with correctly rounded result. */
-//
-//#define MANT_DIG_DIGITS (DBL_MANT_DIG / PyLong_SHIFT)
-//#define MANT_DIG_BITS (DBL_MANT_DIG % PyLong_SHIFT)
-//
-//static PyObject *
-//long_true_divide(PyObject *v, PyObject *w)
-//{
-//    PyLongObject *a, *b, *x;
-//    Py_ssize_t a_size, b_size, shift, extra_bits, diff, x_size, x_bits;
-//    digit mask, low;
-//    int inexact, negate, a_is_small, b_is_small;
-//    double dx, result;
-//
-//    CHECK_BINOP(v, w);
-//    a = (PyLongObject *)v;
-//    b = (PyLongObject *)w;
-//
-//    /*
-//       Method in a nutshell:
-//
-//         0. reduce to case a, b > 0; filter out obvious underflow/overflow
-//         1. choose a suitable integer 'shift'
-//         2. use integer arithmetic to compute x = floor(2**-shift*a/b)
-//         3. adjust x for correct rounding
-//         4. convert x to a double dx with the same value
-//         5. return ldexp(dx, shift).
-//
-//       In more detail:
-//
-//       0. For any a, a/0 raises ZeroDivisionError; for nonzero b, 0/b
-//       returns either 0.0 or -0.0, depending on the sign of b.  For a and
-//       b both nonzero, ignore signs of a and b, and add the sign back in
-//       at the end.  Now write a_bits and b_bits for the bit lengths of a
-//       and b respectively (that is, a_bits = 1 + floor(log_2(a)); likewise
-//       for b).  Then
-//
-//          2**(a_bits - b_bits - 1) < a/b < 2**(a_bits - b_bits + 1).
-//
-//       So if a_bits - b_bits > DBL_MAX_EXP then a/b > 2**DBL_MAX_EXP and
-//       so overflows.  Similarly, if a_bits - b_bits < DBL_MIN_EXP -
-//       DBL_MANT_DIG - 1 then a/b underflows to 0.  With these cases out of
-//       the way, we can assume that
-//
-//          DBL_MIN_EXP - DBL_MANT_DIG - 1 <= a_bits - b_bits <= DBL_MAX_EXP.
-//
-//       1. The integer 'shift' is chosen so that x has the right number of
-//       bits for a double, plus two or three extra bits that will be used
-//       in the rounding decisions.  Writing a_bits and b_bits for the
-//       number of significant bits in a and b respectively, a
-//       straightforward formula for shift is:
-//
-//          shift = a_bits - b_bits - DBL_MANT_DIG - 2
-//
-//       This is fine in the usual case, but if a/b is smaller than the
-//       smallest normal float then it can lead to double rounding on an
-//       IEEE 754 platform, giving incorrectly rounded results.  So we
-//       adjust the formula slightly.  The actual formula used is:
-//
-//           shift = MAX(a_bits - b_bits, DBL_MIN_EXP) - DBL_MANT_DIG - 2
-//
-//       2. The quantity x is computed by first shifting a (left -shift bits
-//       if shift <= 0, right shift bits if shift > 0) and then dividing by
-//       b.  For both the shift and the division, we keep track of whether
-//       the result is inexact, in a flag 'inexact'; this information is
-//       needed at the rounding stage.
-//
-//       With the choice of shift above, together with our assumption that
-//       a_bits - b_bits >= DBL_MIN_EXP - DBL_MANT_DIG - 1, it follows
-//       that x >= 1.
-//
-//       3. Now x * 2**shift <= a/b < (x+1) * 2**shift.  We want to replace
-//       this with an exactly representable float of the form
-//
-//          round(x/2**extra_bits) * 2**(extra_bits+shift).
-//
-//       For float representability, we need x/2**extra_bits <
-//       2**DBL_MANT_DIG and extra_bits + shift >= DBL_MIN_EXP -
-//       DBL_MANT_DIG.  This translates to the condition:
-//
-//          extra_bits >= MAX(x_bits, DBL_MIN_EXP - shift) - DBL_MANT_DIG
-//
-//       To round, we just modify the bottom digit of x in-place; this can
-//       end up giving a digit with value > PyLONG_MASK, but that's not a
-//       problem since digits can hold values up to 2*PyLONG_MASK+1.
-//
-//       With the original choices for shift above, extra_bits will always
-//       be 2 or 3.  Then rounding under the round-half-to-even rule, we
-//       round up iff the most significant of the extra bits is 1, and
-//       either: (a) the computation of x in step 2 had an inexact result,
-//       or (b) at least one other of the extra bits is 1, or (c) the least
-//       significant bit of x (above those to be rounded) is 1.
-//
-//       4. Conversion to a double is straightforward; all floating-point
-//       operations involved in the conversion are exact, so there's no
-//       danger of rounding errors.
-//
-//       5. Use ldexp(x, shift) to compute x*2**shift, the final result.
-//       The result will always be exactly representable as a double, except
-//       in the case that it overflows.  To avoid dependence on the exact
-//       behaviour of ldexp on overflow, we check for overflow before
-//       applying ldexp.  The result of ldexp is adjusted for sign before
-//       returning.
-//    */
-//
-//    /* Reduce to case where a and b are both positive. */
-//    a_size = Py_ABS(Py_SIZE(a));
-//    b_size = Py_ABS(Py_SIZE(b));
-//    negate = (Py_SIZE(a) < 0) ^ (Py_SIZE(b) < 0);
-//    if (b_size == 0) {
-//        PyErr_SetString(PyExc_ZeroDivisionError,
-//                        "division by zero");
-//        goto error;
-//    }
-//    if (a_size == 0)
-//        goto underflow_or_zero;
-//
-//    /* Fast path for a and b small (exactly representable in a double).
-//       Relies on floating-point division being correctly rounded; results
-//       may be subject to double rounding on x86 machines that operate with
-//       the x87 FPU set to 64-bit precision. */
-//    a_is_small = a_size <= MANT_DIG_DIGITS ||
-//        (a_size == MANT_DIG_DIGITS+1 &&
-//         a->ob_digit[MANT_DIG_DIGITS] >> MANT_DIG_BITS == 0);
-//    b_is_small = b_size <= MANT_DIG_DIGITS ||
-//        (b_size == MANT_DIG_DIGITS+1 &&
-//         b->ob_digit[MANT_DIG_DIGITS] >> MANT_DIG_BITS == 0);
-//    if (a_is_small && b_is_small) {
-//        double da, db;
-//        da = a->ob_digit[--a_size];
-//        while (a_size > 0)
-//            da = da * PyLong_BASE + a->ob_digit[--a_size];
-//        db = b->ob_digit[--b_size];
-//        while (b_size > 0)
-//            db = db * PyLong_BASE + b->ob_digit[--b_size];
-//        result = da / db;
-//        goto success;
-//    }
-//
-//    /* Catch obvious cases of underflow and overflow */
-//    diff = a_size - b_size;
-//    if (diff > PY_SSIZE_T_MAX/PyLong_SHIFT - 1)
-//        /* Extreme overflow */
-//        goto overflow;
-//    else if (diff < 1 - PY_SSIZE_T_MAX/PyLong_SHIFT)
-//        /* Extreme underflow */
-//        goto underflow_or_zero;
-//    /* Next line is now safe from overflowing a Py_ssize_t */
-//    diff = diff * PyLong_SHIFT + bit_length_digit(a->ob_digit[a_size - 1]) -
-//        bit_length_digit(b->ob_digit[b_size - 1]);
-//    /* Now diff = a_bits - b_bits. */
-//    if (diff > DBL_MAX_EXP)
-//        goto overflow;
-//    else if (diff < DBL_MIN_EXP - DBL_MANT_DIG - 1)
-//        goto underflow_or_zero;
-//
-//    /* Choose value for shift; see comments for step 1 above. */
-//    shift = Py_MAX(diff, DBL_MIN_EXP) - DBL_MANT_DIG - 2;
-//
-//    inexact = 0;
-//
-//    /* x = abs(a * 2**-shift) */
-//    if (shift <= 0) {
-//        Py_ssize_t i, shift_digits = -shift / PyLong_SHIFT;
-//        digit rem;
-//        /* x = a << -shift */
-//        if (a_size >= PY_SSIZE_T_MAX - 1 - shift_digits) {
-//            /* In practice, it's probably impossible to end up
-//               here.  Both a and b would have to be enormous,
-//               using close to SIZE_T_MAX bytes of memory each. */
-//            PyErr_SetString(PyExc_OverflowError,
-//                            "intermediate overflow during division");
-//            goto error;
-//        }
-//        x = _PyLong_New(a_size + shift_digits + 1);
-//        if (x == NULL)
-//            goto error;
-//        for (i = 0; i < shift_digits; i++)
-//            x->ob_digit[i] = 0;
-//        rem = v_lshift(x->ob_digit + shift_digits, a->ob_digit,
-//                       a_size, -shift % PyLong_SHIFT);
-//        x->ob_digit[a_size + shift_digits] = rem;
-//    }
-//    else {
-//        Py_ssize_t shift_digits = shift / PyLong_SHIFT;
-//        digit rem;
-//        /* x = a >> shift */
-//        assert(a_size >= shift_digits);
-//        x = _PyLong_New(a_size - shift_digits);
-//        if (x == NULL)
-//            goto error;
-//        rem = v_rshift(x->ob_digit, a->ob_digit + shift_digits,
-//                       a_size - shift_digits, shift % PyLong_SHIFT);
-//        /* set inexact if any of the bits shifted out is nonzero */
-//        if (rem)
-//            inexact = 1;
-//        while (!inexact && shift_digits > 0)
-//            if (a->ob_digit[--shift_digits])
-//                inexact = 1;
-//    }
-//    long_normalize(x);
-//    x_size = Py_SIZE(x);
-//
-//    /* x //= b. If the remainder is nonzero, set inexact.  We own the only
-//       reference to x, so it's safe to modify it in-place. */
-//    if (b_size == 1) {
-//        digit rem = inplace_divrem1(x->ob_digit, x->ob_digit, x_size,
-//                              b->ob_digit[0]);
-//        long_normalize(x);
-//        if (rem)
-//            inexact = 1;
-//    }
-//    else {
-//        PyLongObject *div, *rem;
-//        div = x_divrem(x, b, &rem);
-//        Py_DECREF(x);
-//        x = div;
-//        if (x == NULL)
-//            goto error;
-//        if (Py_SIZE(rem))
-//            inexact = 1;
-//        Py_DECREF(rem);
-//    }
-//    x_size = Py_ABS(Py_SIZE(x));
-//    assert(x_size > 0); /* result of division is never zero */
-//    x_bits = (x_size-1)*PyLong_SHIFT+bit_length_digit(x->ob_digit[x_size-1]);
-//
-//    /* The number of extra bits that have to be rounded away. */
-//    extra_bits = Py_MAX(x_bits, DBL_MIN_EXP - shift) - DBL_MANT_DIG;
-//    assert(extra_bits == 2 || extra_bits == 3);
-//
-//    /* Round by directly modifying the low digit of x. */
-//    mask = (digit)1 << (extra_bits - 1);
-//    low = x->ob_digit[0] | inexact;
-//    if ((low & mask) && (low & (3U*mask-1U)))
-//        low += mask;
-//    x->ob_digit[0] = low & ~(2U*mask-1U);
-//
-//    /* Convert x to a double dx; the conversion is exact. */
-//    dx = x->ob_digit[--x_size];
-//    while (x_size > 0)
-//        dx = dx * PyLong_BASE + x->ob_digit[--x_size];
-//    Py_DECREF(x);
-//
-//    /* Check whether ldexp result will overflow a double. */
-//    if (shift + x_bits >= DBL_MAX_EXP &&
-//        (shift + x_bits > DBL_MAX_EXP || dx == ldexp(1.0, (int)x_bits)))
-//        goto overflow;
-//    result = ldexp(dx, (int)shift);
-//
-//  success:
-//    return PyFloat_FromDouble(negate ? -result : result);
-//
-//  underflow_or_zero:
-//    return PyFloat_FromDouble(negate ? -0.0 : 0.0);
-//
-//  overflow:
-//    PyErr_SetString(PyExc_OverflowError,
-//                    "integer division result too large for a float");
-//  error:
-//    return NULL;
-//}
-//
-//static PyObject *
-//long_mod(PyObject *a, PyObject *b)
-//{
-//    PyLongObject *mod;
-//
-//    CHECK_BINOP(a, b);
-//
-//    if (Py_ABS(Py_SIZE(a)) == 1 && Py_ABS(Py_SIZE(b)) == 1) {
-//        return fast_mod((PyLongObject*)a, (PyLongObject*)b);
-//    }
-//
-//    if (l_divmod((PyLongObject*)a, (PyLongObject*)b, NULL, &mod) < 0)
-//        mod = NULL;
-//    return (PyObject *)mod;
-//}
-//
-//static PyObject *
-//long_divmod(PyObject *a, PyObject *b)
-//{
-//    PyLongObject *div, *mod;
-//    PyObject *z;
-//
-//    CHECK_BINOP(a, b);
-//
-//    if (l_divmod((PyLongObject*)a, (PyLongObject*)b, &div, &mod) < 0) {
-//        return NULL;
-//    }
-//    z = PyTuple_New(2);
-//    if (z != NULL) {
-//        PyTuple_SET_ITEM(z, 0, (PyObject *) div);
-//        PyTuple_SET_ITEM(z, 1, (PyObject *) mod);
-//    }
-//    else {
-//        Py_DECREF(div);
-//        Py_DECREF(mod);
-//    }
-//    return z;
-//}
-//
-//
-///* Compute an inverse to a modulo n, or raise ValueError if a is not
-//   invertible modulo n. Assumes n is positive. The inverse returned
-//   is whatever falls out of the extended Euclidean algorithm: it may
-//   be either positive or negative, but will be smaller than n in
-//   absolute value.
-//
-//   Pure Python equivalent for long_invmod:
-//
-//        def invmod(a, n):
-//            b, c = 1, 0
-//            while n:
-//                q, r = divmod(a, n)
-//                a, b, c, n = n, c, b - q*c, r
-//
-//            # at this point a is the gcd of the original inputs
-//            if a == 1:
-//                return b
-//            raise ValueError("Not invertible")
-//*/
-//
-//static PyLongObject *
-//long_invmod(PyLongObject *a, PyLongObject *n)
-//{
-//    PyLongObject *b, *c;
-//
-//    /* Should only ever be called for positive n */
-//    assert(Py_SIZE(n) > 0);
-//
-//    b = (PyLongObject *)PyLong_FromLong(1L);
-//    if (b == NULL) {
-//        return NULL;
-//    }
-//    c = (PyLongObject *)PyLong_FromLong(0L);
-//    if (c == NULL) {
-//        Py_DECREF(b);
-//        return NULL;
-//    }
-//    Py_INCREF(a);
-//    Py_INCREF(n);
-//
-//    /* references now owned: a, b, c, n */
-//    while (Py_SIZE(n) != 0) {
-//        PyLongObject *q, *r, *s, *t;
-//
-//        if (l_divmod(a, n, &q, &r) == -1) {
-//            goto Error;
-//        }
-//        Py_DECREF(a);
-//        a = n;
-//        n = r;
-//        t = (PyLongObject *)long_mul(q, c);
-//        Py_DECREF(q);
-//        if (t == NULL) {
-//            goto Error;
-//        }
-//        s = (PyLongObject *)long_sub(b, t);
-//        Py_DECREF(t);
-//        if (s == NULL) {
-//            goto Error;
-//        }
-//        Py_DECREF(b);
-//        b = c;
-//        c = s;
-//    }
-//    /* references now owned: a, b, c, n */
-//
-//    Py_DECREF(c);
-//    Py_DECREF(n);
-//    if (long_compare(a, (PyLongObject *)_PyLong_GetOne())) {
-//        /* a != 1; we don't have an inverse. */
-//        Py_DECREF(a);
-//        Py_DECREF(b);
-//        PyErr_SetString(PyExc_ValueError,
-//                        "base is not invertible for the given modulus");
-//        return NULL;
-//    }
-//    else {
-//        /* a == 1; b gives an inverse modulo n */
-//        Py_DECREF(a);
-//        return b;
-//    }
-//
-//  Error:
-//    Py_DECREF(a);
-//    Py_DECREF(b);
-//    Py_DECREF(c);
-//    Py_DECREF(n);
-//    return NULL;
-//}
-//
-//
-///* pow(v, w, x) */
-//static PyObject *
-//long_pow(PyObject *v, PyObject *w, PyObject *x)
-//{
-//    PyLongObject *a, *b, *c; /* a,b,c = v,w,x */
-//    int negativeOutput = 0;  /* if x<0 return negative output */
-//
-//    PyLongObject *z = NULL;  /* accumulated result */
-//    Py_ssize_t i, j, k;             /* counters */
-//    PyLongObject *temp = NULL;
-//
-//    /* 5-ary values.  If the exponent is large enough, table is
-//     * precomputed so that table[i] == a**i % c for i in range(32).
-//     */
-//    PyLongObject *table[32] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-//                               0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
-//
-//    /* a, b, c = v, w, x */
-//    CHECK_BINOP(v, w);
-//    a = (PyLongObject*)v; Py_INCREF(a);
-//    b = (PyLongObject*)w; Py_INCREF(b);
-//    if (PyLong_Check(x)) {
-//        c = (PyLongObject *)x;
-//        Py_INCREF(x);
-//    }
-//    else if (x == Py_None)
-//        c = NULL;
-//    else {
-//        Py_DECREF(a);
-//        Py_DECREF(b);
-//        Py_RETURN_NOTIMPLEMENTED;
-//    }
-//
-//    if (Py_SIZE(b) < 0 && c == NULL) {
-//        /* if exponent is negative and there's no modulus:
-//               return a float.  This works because we know
-//               that this calls float_pow() which converts its
-//               arguments to double. */
-//        Py_DECREF(a);
-//        Py_DECREF(b);
-//        return PyFloat_Type.tp_as_number->nb_power(v, w, x);
-//    }
-//
-//    if (c) {
-//        /* if modulus == 0:
-//               raise ValueError() */
-//        if (Py_SIZE(c) == 0) {
-//            PyErr_SetString(PyExc_ValueError,
-//                            "pow() 3rd argument cannot be 0");
-//            goto Error;
-//        }
-//
-//        /* if modulus < 0:
-//               negativeOutput = True
-//               modulus = -modulus */
-//        if (Py_SIZE(c) < 0) {
-//            negativeOutput = 1;
-//            temp = (PyLongObject *)_PyLong_Copy(c);
-//            if (temp == NULL)
-//                goto Error;
-//            Py_DECREF(c);
-//            c = temp;
-//            temp = NULL;
-//            _PyLong_Negate(&c);
-//            if (c == NULL)
-//                goto Error;
-//        }
-//
-//        /* if modulus == 1:
-//               return 0 */
-//        if ((Py_SIZE(c) == 1) && (c->ob_digit[0] == 1)) {
-//            z = (PyLongObject *)PyLong_FromLong(0L);
-//            goto Done;
-//        }
-//
-//        /* if exponent is negative, negate the exponent and
-//           replace the base with a modular inverse */
-//        if (Py_SIZE(b) < 0) {
-//            temp = (PyLongObject *)_PyLong_Copy(b);
-//            if (temp == NULL)
-//                goto Error;
-//            Py_DECREF(b);
-//            b = temp;
-//            temp = NULL;
-//            _PyLong_Negate(&b);
-//            if (b == NULL)
-//                goto Error;
-//
-//            temp = long_invmod(a, c);
-//            if (temp == NULL)
-//                goto Error;
-//            Py_DECREF(a);
-//            a = temp;
-//            temp = NULL;
-//        }
-//
-//        /* Reduce base by modulus in some cases:
-//           1. If base < 0.  Forcing the base non-negative makes things easier.
-//           2. If base is obviously larger than the modulus.  The "small
-//              exponent" case later can multiply directly by base repeatedly,
-//              while the "large exponent" case multiplies directly by base 31
-//              times.  It can be unboundedly faster to multiply by
-//              base % modulus instead.
-//           We could _always_ do this reduction, but l_divmod() isn't cheap,
-//           so we only do it when it buys something. */
-//        if (Py_SIZE(a) < 0 || Py_SIZE(a) > Py_SIZE(c)) {
-//            if (l_divmod(a, c, NULL, &temp) < 0)
-//                goto Error;
-//            Py_DECREF(a);
-//            a = temp;
-//            temp = NULL;
-//        }
-//    }
-//
-//    /* At this point a, b, and c are guaranteed non-negative UNLESS
-//       c is NULL, in which case a may be negative. */
-//
-//    z = (PyLongObject *)PyLong_FromLong(1L);
-//    if (z == NULL)
-//        goto Error;
-//
-//    /* Perform a modular reduction, X = X % c, but leave X alone if c
-//     * is NULL.
-//     */
-//#define REDUCE(X)                                       \
-//    do {                                                \
-//        if (c != NULL) {                                \
-//            if (l_divmod(X, c, NULL, &temp) < 0)        \
-//                goto Error;                             \
-//            Py_XDECREF(X);                              \
-//            X = temp;                                   \
-//            temp = NULL;                                \
-//        }                                               \
-//    } while(0)
-//
-//    /* Multiply two values, then reduce the result:
-//       result = X*Y % c.  If c is NULL, skip the mod. */
-//#define MULT(X, Y, result)                      \
-//    do {                                        \
-//        temp = (PyLongObject *)long_mul(X, Y);  \
-//        if (temp == NULL)                       \
-//            goto Error;                         \
-//        Py_XDECREF(result);                     \
-//        result = temp;                          \
-//        temp = NULL;                            \
-//        REDUCE(result);                         \
-//    } while(0)
-//
-//    i = Py_SIZE(b);
-//    digit bi = i ? b->ob_digit[i-1] : 0;
-//    digit bit;
-//    if (i <= 1 && bi <= 3) {
-//        /* aim for minimal overhead */
-//        if (bi >= 2) {
-//            MULT(a, a, z);
-//            if (bi == 3) {
-//                MULT(z, a, z);
-//            }
-//        }
-//        else if (bi == 1) {
-//            /* Multiplying by 1 serves two purposes: if `a` is of an int
-//             * subclass, makes the result an int (e.g., pow(False, 1) returns
-//             * 0 instead of False), and potentially reduces `a` by the modulus.
-//             */
-//            MULT(a, z, z);
-//        }
-//        /* else bi is 0, and z==1 is correct */
-//    }
-//    else if (i <= FIVEARY_CUTOFF) {
-//        /* Left-to-right binary exponentiation (HAC Algorithm 14.79) */
-//        /* http://www.cacr.math.uwaterloo.ca/hac/about/chap14.pdf    */
-//
-//        /* Find the first significant exponent bit. Search right to left
-//         * because we're primarily trying to cut overhead for small powers.
-//         */
-//        assert(bi);  /* else there is no significant bit */
-//        Py_INCREF(a);
-//        Py_DECREF(z);
-//        z = a;
-//        for (bit = 2; ; bit <<= 1) {
-//            if (bit > bi) { /* found the first bit */
-//                assert((bi & bit) == 0);
-//                bit >>= 1;
-//                assert(bi & bit);
-//                break;
-//            }
-//        }
-//        for (--i, bit >>= 1;;) {
-//            for (; bit != 0; bit >>= 1) {
-//                MULT(z, z, z);
-//                if (bi & bit) {
-//                    MULT(z, a, z);
-//                }
-//            }
-//            if (--i < 0) {
-//                break;
-//            }
-//            bi = b->ob_digit[i];
-//            bit = (digit)1 << (PyLong_SHIFT-1);
-//        }
-//    }
-//    else {
-//        /* Left-to-right 5-ary exponentiation (HAC Algorithm 14.82) */
-//        Py_INCREF(z);           /* still holds 1L */
-//        table[0] = z;
-//        for (i = 1; i < 32; ++i)
-//            MULT(table[i-1], a, table[i]);
-//
-//        for (i = Py_SIZE(b) - 1; i >= 0; --i) {
-//            const digit bi = b->ob_digit[i];
-//
-//            for (j = PyLong_SHIFT - 5; j >= 0; j -= 5) {
-//                const int index = (bi >> j) & 0x1f;
-//                for (k = 0; k < 5; ++k)
-//                    MULT(z, z, z);
-//                if (index)
-//                    MULT(z, table[index], z);
-//            }
-//        }
-//    }
-//
-//    if (negativeOutput && (Py_SIZE(z) != 0)) {
-//        temp = (PyLongObject *)long_sub(z, c);
-//        if (temp == NULL)
-//            goto Error;
-//        Py_DECREF(z);
-//        z = temp;
-//        temp = NULL;
-//    }
-//    goto Done;
-//
-//  Error:
-//    Py_CLEAR(z);
-//    /* fall through */
-//  Done:
-//    if (Py_SIZE(b) > FIVEARY_CUTOFF) {
-//        for (i = 0; i < 32; ++i)
-//            Py_XDECREF(table[i]);
-//    }
-//    Py_DECREF(a);
-//    Py_DECREF(b);
-//    Py_XDECREF(c);
-//    Py_XDECREF(temp);
-//    return (PyObject *)z;
-//}
-//
-//static PyObject *
-//long_invert(PyLongObject *v)
-//{
-//    /* Implement ~x as -(x+1) */
-//    PyLongObject *x;
-//    if (IS_MEDIUM_VALUE(v))
-//        return _PyLong_FromSTwoDigits(~medium_value(v));
-//    x = (PyLongObject *) long_add(v, (PyLongObject *)_PyLong_GetOne());
-//    if (x == NULL)
-//        return NULL;
-//    _PyLong_Negate(&x);
-//    /* No need for maybe_small_long here, since any small
-//       longs will have been caught in the Py_SIZE <= 1 fast path. */
-//    return (PyObject *)x;
-//}
-//
-//static PyObject *
-//long_neg(PyLongObject *v)
-//{
-//    PyLongObject *z;
-//    if (IS_MEDIUM_VALUE(v))
-//        return _PyLong_FromSTwoDigits(-medium_value(v));
-//    z = (PyLongObject *)_PyLong_Copy(v);
-//    if (z != NULL)
-//        Py_SET_SIZE(z, -(Py_SIZE(v)));
-//    return (PyObject *)z;
-//}
-//
-//static PyObject *
-//long_abs(PyLongObject *v)
-//{
-//    if (Py_SIZE(v) < 0)
-//        return long_neg(v);
-//    else
-//        return long_long((PyObject *)v);
-//}
-//
-//static int
-//long_bool(PyLongObject *v)
-//{
-//    return Py_SIZE(v) != 0;
-//}
-//
-///* wordshift, remshift = divmod(shiftby, PyLong_SHIFT) */
-//static int
-//divmod_shift(PyObject *shiftby, Py_ssize_t *wordshift, digit *remshift)
-//{
-//    assert(PyLong_Check(shiftby));
-//    assert(Py_SIZE(shiftby) >= 0);
-//    Py_ssize_t lshiftby = PyLong_AsSsize_t((PyObject *)shiftby);
-//    if (lshiftby >= 0) {
-//        *wordshift = lshiftby / PyLong_SHIFT;
-//        *remshift = lshiftby % PyLong_SHIFT;
-//        return 0;
-//    }
-//    /* PyLong_Check(shiftby) is true and Py_SIZE(shiftby) >= 0, so it must
-//       be that PyLong_AsSsize_t raised an OverflowError. */
+
+#define MANT_DIG_DIGITS (DBL_MANT_DIG / PyLong_SHIFT)
+#define MANT_DIG_BITS (DBL_MANT_DIG % PyLong_SHIFT)
+
+static PyObject *
+long_true_divide(PyObject *v, PyObject *w)
+{
+    PyLongObject *a, *b, *x;
+    Py_ssize_t a_size, b_size, shift, extra_bits, diff, x_size, x_bits;
+    digit mask, low;
+    int inexact, negate, a_is_small, b_is_small;
+    double dx, result;
+
+    CHECK_BINOP(v, w);
+    a = (PyLongObject *)v;
+    b = (PyLongObject *)w;
+
+    /*
+       Method in a nutshell:
+
+         0. reduce to case a, b > 0; filter out obvious underflow/overflow
+         1. choose a suitable integer 'shift'
+         2. use integer arithmetic to compute x = floor(2**-shift*a/b)
+         3. adjust x for correct rounding
+         4. convert x to a double dx with the same value
+         5. return ldexp(dx, shift).
+
+       In more detail:
+
+       0. For any a, a/0 raises ZeroDivisionError; for nonzero b, 0/b
+       returns either 0.0 or -0.0, depending on the sign of b.  For a and
+       b both nonzero, ignore signs of a and b, and add the sign back in
+       at the end.  Now write a_bits and b_bits for the bit lengths of a
+       and b respectively (that is, a_bits = 1 + floor(log_2(a)); likewise
+       for b).  Then
+
+          2**(a_bits - b_bits - 1) < a/b < 2**(a_bits - b_bits + 1).
+
+       So if a_bits - b_bits > DBL_MAX_EXP then a/b > 2**DBL_MAX_EXP and
+       so overflows.  Similarly, if a_bits - b_bits < DBL_MIN_EXP -
+       DBL_MANT_DIG - 1 then a/b underflows to 0.  With these cases out of
+       the way, we can assume that
+
+          DBL_MIN_EXP - DBL_MANT_DIG - 1 <= a_bits - b_bits <= DBL_MAX_EXP.
+
+       1. The integer 'shift' is chosen so that x has the right number of
+       bits for a double, plus two or three extra bits that will be used
+       in the rounding decisions.  Writing a_bits and b_bits for the
+       number of significant bits in a and b respectively, a
+       straightforward formula for shift is:
+
+          shift = a_bits - b_bits - DBL_MANT_DIG - 2
+
+       This is fine in the usual case, but if a/b is smaller than the
+       smallest normal float then it can lead to double rounding on an
+       IEEE 754 platform, giving incorrectly rounded results.  So we
+       adjust the formula slightly.  The actual formula used is:
+
+           shift = MAX(a_bits - b_bits, DBL_MIN_EXP) - DBL_MANT_DIG - 2
+
+       2. The quantity x is computed by first shifting a (left -shift bits
+       if shift <= 0, right shift bits if shift > 0) and then dividing by
+       b.  For both the shift and the division, we keep track of whether
+       the result is inexact, in a flag 'inexact'; this information is
+       needed at the rounding stage.
+
+       With the choice of shift above, together with our assumption that
+       a_bits - b_bits >= DBL_MIN_EXP - DBL_MANT_DIG - 1, it follows
+       that x >= 1.
+
+       3. Now x * 2**shift <= a/b < (x+1) * 2**shift.  We want to replace
+       this with an exactly representable float of the form
+
+          round(x/2**extra_bits) * 2**(extra_bits+shift).
+
+       For float representability, we need x/2**extra_bits <
+       2**DBL_MANT_DIG and extra_bits + shift >= DBL_MIN_EXP -
+       DBL_MANT_DIG.  This translates to the condition:
+
+          extra_bits >= MAX(x_bits, DBL_MIN_EXP - shift) - DBL_MANT_DIG
+
+       To round, we just modify the bottom digit of x in-place; this can
+       end up giving a digit with value > PyLONG_MASK, but that's not a
+       problem since digits can hold values up to 2*PyLONG_MASK+1.
+
+       With the original choices for shift above, extra_bits will always
+       be 2 or 3.  Then rounding under the round-half-to-even rule, we
+       round up iff the most significant of the extra bits is 1, and
+       either: (a) the computation of x in step 2 had an inexact result,
+       or (b) at least one other of the extra bits is 1, or (c) the least
+       significant bit of x (above those to be rounded) is 1.
+
+       4. Conversion to a double is straightforward; all floating-point
+       operations involved in the conversion are exact, so there's no
+       danger of rounding errors.
+
+       5. Use ldexp(x, shift) to compute x*2**shift, the final result.
+       The result will always be exactly representable as a double, except
+       in the case that it overflows.  To avoid dependence on the exact
+       behaviour of ldexp on overflow, we check for overflow before
+       applying ldexp.  The result of ldexp is adjusted for sign before
+       returning.
+    */
+
+    /* Reduce to case where a and b are both positive. */
+    a_size = Py_ABS(Py_SIZE(a));
+    b_size = Py_ABS(Py_SIZE(b));
+    negate = (Py_SIZE(a) < 0) ^ (Py_SIZE(b) < 0);
+    if (b_size == 0) {
+        PyErr_SetString(PyExc_ZeroDivisionError,
+                        "division by zero");
+        goto error;
+    }
+    if (a_size == 0)
+        goto underflow_or_zero;
+
+    /* Fast path for a and b small (exactly representable in a double).
+       Relies on floating-point division being correctly rounded; results
+       may be subject to double rounding on x86 machines that operate with
+       the x87 FPU set to 64-bit precision. */
+    a_is_small = a_size <= MANT_DIG_DIGITS ||
+        (a_size == MANT_DIG_DIGITS+1 &&
+         a->ob_digit[MANT_DIG_DIGITS] >> MANT_DIG_BITS == 0);
+    b_is_small = b_size <= MANT_DIG_DIGITS ||
+        (b_size == MANT_DIG_DIGITS+1 &&
+         b->ob_digit[MANT_DIG_DIGITS] >> MANT_DIG_BITS == 0);
+    if (a_is_small && b_is_small) {
+        double da, db;
+        da = a->ob_digit[--a_size];
+        while (a_size > 0)
+            da = da * PyLong_BASE + a->ob_digit[--a_size];
+        db = b->ob_digit[--b_size];
+        while (b_size > 0)
+            db = db * PyLong_BASE + b->ob_digit[--b_size];
+        result = da / db;
+        goto success;
+    }
+
+    /* Catch obvious cases of underflow and overflow */
+    diff = a_size - b_size;
+    if (diff > PY_SSIZE_T_MAX/PyLong_SHIFT - 1)
+        /* Extreme overflow */
+        goto overflow;
+    else if (diff < 1 - PY_SSIZE_T_MAX/PyLong_SHIFT)
+        /* Extreme underflow */
+        goto underflow_or_zero;
+    /* Next line is now safe from overflowing a Py_ssize_t */
+    diff = diff * PyLong_SHIFT + bit_length_digit(a->ob_digit[a_size - 1]) -
+        bit_length_digit(b->ob_digit[b_size - 1]);
+    /* Now diff = a_bits - b_bits. */
+    if (diff > DBL_MAX_EXP)
+        goto overflow;
+    else if (diff < DBL_MIN_EXP - DBL_MANT_DIG - 1)
+        goto underflow_or_zero;
+
+    /* Choose value for shift; see comments for step 1 above. */
+    shift = Py_MAX(diff, DBL_MIN_EXP) - DBL_MANT_DIG - 2;
+
+    inexact = 0;
+
+    /* x = abs(a * 2**-shift) */
+    if (shift <= 0) {
+        Py_ssize_t i, shift_digits = -shift / PyLong_SHIFT;
+        digit rem;
+        /* x = a << -shift */
+        if (a_size >= PY_SSIZE_T_MAX - 1 - shift_digits) {
+            /* In practice, it's probably impossible to end up
+               here.  Both a and b would have to be enormous,
+               using close to SIZE_T_MAX bytes of memory each. */
+            PyErr_SetString(PyExc_OverflowError,
+                            "intermediate overflow during division");
+            goto error;
+        }
+        x = _PyLong_New(a_size + shift_digits + 1);
+        if (x == NULL)
+            goto error;
+        for (i = 0; i < shift_digits; i++)
+            x->ob_digit[i] = 0;
+        rem = v_lshift(x->ob_digit + shift_digits, a->ob_digit,
+                       a_size, -shift % PyLong_SHIFT);
+        x->ob_digit[a_size + shift_digits] = rem;
+    }
+    else {
+        Py_ssize_t shift_digits = shift / PyLong_SHIFT;
+        digit rem;
+        /* x = a >> shift */
+        assert(a_size >= shift_digits);
+        x = _PyLong_New(a_size - shift_digits);
+        if (x == NULL)
+            goto error;
+        rem = v_rshift(x->ob_digit, a->ob_digit + shift_digits,
+                       a_size - shift_digits, shift % PyLong_SHIFT);
+        /* set inexact if any of the bits shifted out is nonzero */
+        if (rem)
+            inexact = 1;
+        while (!inexact && shift_digits > 0)
+            if (a->ob_digit[--shift_digits])
+                inexact = 1;
+    }
+    long_normalize(x);
+    x_size = Py_SIZE(x);
+
+    /* x //= b. If the remainder is nonzero, set inexact.  We own the only
+       reference to x, so it's safe to modify it in-place. */
+    if (b_size == 1) {
+        digit rem = inplace_divrem1(x->ob_digit, x->ob_digit, x_size,
+                              b->ob_digit[0]);
+        long_normalize(x);
+        if (rem)
+            inexact = 1;
+    }
+    else {
+        PyLongObject *div, *rem;
+        div = x_divrem(x, b, &rem);
+        Py_DECREF(x);
+        x = div;
+        if (x == NULL)
+            goto error;
+        if (Py_SIZE(rem))
+            inexact = 1;
+        Py_DECREF(rem);
+    }
+    x_size = Py_ABS(Py_SIZE(x));
+    assert(x_size > 0); /* result of division is never zero */
+    x_bits = (x_size-1)*PyLong_SHIFT+bit_length_digit(x->ob_digit[x_size-1]);
+
+    /* The number of extra bits that have to be rounded away. */
+    extra_bits = Py_MAX(x_bits, DBL_MIN_EXP - shift) - DBL_MANT_DIG;
+    assert(extra_bits == 2 || extra_bits == 3);
+
+    /* Round by directly modifying the low digit of x. */
+    mask = (digit)1 << (extra_bits - 1);
+    low = x->ob_digit[0] | inexact;
+    if ((low & mask) && (low & (3U*mask-1U)))
+        low += mask;
+    x->ob_digit[0] = low & ~(2U*mask-1U);
+
+    /* Convert x to a double dx; the conversion is exact. */
+    dx = x->ob_digit[--x_size];
+    while (x_size > 0)
+        dx = dx * PyLong_BASE + x->ob_digit[--x_size];
+    Py_DECREF(x);
+
+    /* Check whether ldexp result will overflow a double. */
+    if (shift + x_bits >= DBL_MAX_EXP &&
+        (shift + x_bits > DBL_MAX_EXP || dx == ldexp(1.0, (int)x_bits)))
+        goto overflow;
+    result = ldexp(dx, (int)shift);
+
+  success:
+    return PyFloat_FromDouble(negate ? -result : result);
+
+  underflow_or_zero:
+    return PyFloat_FromDouble(negate ? -0.0 : 0.0);
+
+  overflow:
+    PyErr_SetString(PyExc_OverflowError,
+                    "integer division result too large for a float");
+  error:
+    return NULL;
+}
+
+static PyObject *
+long_mod(PyObject *a, PyObject *b)
+{
+    PyLongObject *mod;
+
+    CHECK_BINOP(a, b);
+
+    if (Py_ABS(Py_SIZE(a)) == 1 && Py_ABS(Py_SIZE(b)) == 1) {
+        return fast_mod((PyLongObject*)a, (PyLongObject*)b);
+    }
+
+    if (l_divmod((PyLongObject*)a, (PyLongObject*)b, NULL, &mod) < 0)
+        mod = NULL;
+
+    return (PyObject *)mod;
+}
+
+static PyObject *
+long_divmod(PyObject *a, PyObject *b)
+{
+    PyLongObject *div, *mod;
+    PyObject *z;
+
+    CHECK_BINOP(a, b);
+
+    if (l_divmod((PyLongObject*)a, (PyLongObject*)b, &div, &mod) < 0) {
+        return NULL;
+    }
+    z = PyTuple_New(2);
+    if (z != NULL) {
+        PyTuple_SET_ITEM(z, 0, (PyObject *) div);
+        PyTuple_SET_ITEM(z, 1, (PyObject *) mod);
+    }
+    else {
+        Py_DECREF(div);
+        Py_DECREF(mod);
+    }
+    return z;
+}
+
+
+/* Compute an inverse to a modulo n, or raise ValueError if a is not
+   invertible modulo n. Assumes n is positive. The inverse returned
+   is whatever falls out of the extended Euclidean algorithm: it may
+   be either positive or negative, but will be smaller than n in
+   absolute value.
+
+   Pure Python equivalent for long_invmod:
+
+        def invmod(a, n):
+            b, c = 1, 0
+            while n:
+                q, r = divmod(a, n)
+                a, b, c, n = n, c, b - q*c, r
+
+            # at this point a is the gcd of the original inputs
+            if a == 1:
+                return b
+            raise ValueError("Not invertible")
+*/
+
+static PyLongObject *
+long_invmod(PyLongObject *a, PyLongObject *n)
+{
+    PyLongObject *b, *c;
+
+    /* Should only ever be called for positive n */
+    assert(Py_SIZE(n) > 0);
+
+    b = (PyLongObject *)PyLong_FromLong(1L);
+    if (b == NULL) {
+        return NULL;
+    }
+    c = (PyLongObject *)PyLong_FromLong(0L);
+    if (c == NULL) {
+        Py_DECREF(b);
+        return NULL;
+    }
+    Py_INCREF(a);
+    Py_INCREF(n);
+
+    /* references now owned: a, b, c, n */
+    while (Py_SIZE(n) != 0) {
+        PyLongObject *q, *r, *s, *t;
+
+        if (l_divmod(a, n, &q, &r) == -1) {
+            goto Error;
+        }
+        Py_DECREF(a);
+        a = n;
+        n = r;
+        t = (PyLongObject *)long_mul(q, c);
+        Py_DECREF(q);
+        if (t == NULL) {
+            goto Error;
+        }
+        s = (PyLongObject *)long_sub(b, t);
+        Py_DECREF(t);
+        if (s == NULL) {
+            goto Error;
+        }
+        Py_DECREF(b);
+        b = c;
+        c = s;
+    }
+    /* references now owned: a, b, c, n */
+
+    Py_DECREF(c);
+    Py_DECREF(n);
+    if (long_compare(a, (PyLongObject *)_PyLong_GetOne())) {
+        /* a != 1; we don't have an inverse. */
+        Py_DECREF(a);
+        Py_DECREF(b);
+        PyErr_SetString(PyExc_ValueError,
+                        "base is not invertible for the given modulus");
+        return NULL;
+    }
+    else {
+        /* a == 1; b gives an inverse modulo n */
+        Py_DECREF(a);
+        return b;
+    }
+
+  Error:
+    Py_DECREF(a);
+    Py_DECREF(b);
+    Py_DECREF(c);
+    Py_DECREF(n);
+    return NULL;
+}
+
+
+/* pow(v, w, x) */
+static PyObject *
+long_pow(PyObject *v, PyObject *w, PyObject *x)
+{
+    PyLongObject *a, *b, *c; /* a,b,c = v,w,x */
+    int negativeOutput = 0;  /* if x<0 return negative output */
+
+    PyLongObject *z = NULL;  /* accumulated result */
+    Py_ssize_t i, j, k;             /* counters */
+    PyLongObject *temp = NULL;
+
+    /* 5-ary values.  If the exponent is large enough, table is
+     * precomputed so that table[i] == a**i % c for i in range(32).
+     */
+    PyLongObject *table[32] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                               0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+
+    /* a, b, c = v, w, x */
+    CHECK_BINOP(v, w);
+    a = (PyLongObject*)v; Py_INCREF(a);
+    b = (PyLongObject*)w; Py_INCREF(b);
+    if (PyLong_Check(x)) {
+        c = (PyLongObject *)x;
+        Py_INCREF(x);
+    }
+    else if (x == Py_None)
+        c = NULL;
+    else {
+        Py_DECREF(a);
+        Py_DECREF(b);
+        Py_RETURN_NOTIMPLEMENTED;
+    }
+
+    if (Py_SIZE(b) < 0 && c == NULL) {
+        /* if exponent is negative and there's no modulus:
+               return a float.  This works because we know
+               that this calls float_pow() which converts its
+               arguments to double. */
+        Py_DECREF(a);
+        Py_DECREF(b);
+        return PyFloat_Type.tp_as_number->nb_power(v, w, x);
+    }
+
+    if (c) {
+        /* if modulus == 0:
+               raise ValueError() */
+        if (Py_SIZE(c) == 0) {
+            PyErr_SetString(PyExc_ValueError,
+                            "pow() 3rd argument cannot be 0");
+            goto Error;
+        }
+
+        /* if modulus < 0:
+               negativeOutput = True
+               modulus = -modulus */
+        if (Py_SIZE(c) < 0) {
+            negativeOutput = 1;
+            temp = (PyLongObject *)_PyLong_Copy(c);
+            if (temp == NULL)
+                goto Error;
+            Py_DECREF(c);
+            c = temp;
+            temp = NULL;
+            _PyLong_Negate(&c);
+            if (c == NULL)
+                goto Error;
+        }
+
+        /* if modulus == 1:
+               return 0 */
+        if ((Py_SIZE(c) == 1) && (c->ob_digit[0] == 1)) {
+            z = (PyLongObject *)PyLong_FromLong(0L);
+            goto Done;
+        }
+
+        /* if exponent is negative, negate the exponent and
+           replace the base with a modular inverse */
+        if (Py_SIZE(b) < 0) {
+            temp = (PyLongObject *)_PyLong_Copy(b);
+            if (temp == NULL)
+                goto Error;
+            Py_DECREF(b);
+            b = temp;
+            temp = NULL;
+            _PyLong_Negate(&b);
+            if (b == NULL)
+                goto Error;
+
+            temp = long_invmod(a, c);
+            if (temp == NULL)
+                goto Error;
+            Py_DECREF(a);
+            a = temp;
+            temp = NULL;
+        }
+
+        /* Reduce base by modulus in some cases:
+           1. If base < 0.  Forcing the base non-negative makes things easier.
+           2. If base is obviously larger than the modulus.  The "small
+              exponent" case later can multiply directly by base repeatedly,
+              while the "large exponent" case multiplies directly by base 31
+              times.  It can be unboundedly faster to multiply by
+              base % modulus instead.
+           We could _always_ do this reduction, but l_divmod() isn't cheap,
+           so we only do it when it buys something. */
+        if (Py_SIZE(a) < 0 || Py_SIZE(a) > Py_SIZE(c)) {
+            if (l_divmod(a, c, NULL, &temp) < 0)
+                goto Error;
+            Py_DECREF(a);
+            a = temp;
+            temp = NULL;
+        }
+    }
+
+    /* At this point a, b, and c are guaranteed non-negative UNLESS
+       c is NULL, in which case a may be negative. */
+
+    z = (PyLongObject *)PyLong_FromLong(1L);
+    if (z == NULL)
+        goto Error;
+
+    /* Perform a modular reduction, X = X % c, but leave X alone if c
+     * is NULL.
+     */
+#define REDUCE(X)                                       \
+    do {                                                \
+        if (c != NULL) {                                \
+            if (l_divmod(X, c, NULL, &temp) < 0)        \
+                goto Error;                             \
+            Py_XDECREF(X);                              \
+            X = temp;                                   \
+            temp = NULL;                                \
+        }                                               \
+    } while(0)
+
+    /* Multiply two values, then reduce the result:
+       result = X*Y % c.  If c is NULL, skip the mod. */
+#define MULT(X, Y, result)                      \
+    do {                                        \
+        temp = (PyLongObject *)long_mul(X, Y);  \
+        if (temp == NULL)                       \
+            goto Error;                         \
+        Py_XDECREF(result);                     \
+        result = temp;                          \
+        temp = NULL;                            \
+        REDUCE(result);                         \
+    } while(0)
+
+    i = Py_SIZE(b);
+    digit bi = i ? b->ob_digit[i-1] : 0;
+    digit bit;
+    if (i <= 1 && bi <= 3) {
+        /* aim for minimal overhead */
+        if (bi >= 2) {
+            MULT(a, a, z);
+            if (bi == 3) {
+                MULT(z, a, z);
+            }
+        }
+        else if (bi == 1) {
+            /* Multiplying by 1 serves two purposes: if `a` is of an int
+             * subclass, makes the result an int (e.g., pow(False, 1) returns
+             * 0 instead of False), and potentially reduces `a` by the modulus.
+             */
+            MULT(a, z, z);
+        }
+        /* else bi is 0, and z==1 is correct */
+    }
+    else if (i <= FIVEARY_CUTOFF) {
+        /* Left-to-right binary exponentiation (HAC Algorithm 14.79) */
+        /* http://www.cacr.math.uwaterloo.ca/hac/about/chap14.pdf    */
+
+        /* Find the first significant exponent bit. Search right to left
+         * because we're primarily trying to cut overhead for small powers.
+         */
+        assert(bi);  /* else there is no significant bit */
+        Py_INCREF(a);
+        Py_DECREF(z);
+        z = a;
+        for (bit = 2; ; bit <<= 1) {
+            if (bit > bi) { /* found the first bit */
+                assert((bi & bit) == 0);
+                bit >>= 1;
+                assert(bi & bit);
+                break;
+            }
+        }
+        for (--i, bit >>= 1;;) {
+            for (; bit != 0; bit >>= 1) {
+                MULT(z, z, z);
+                if (bi & bit) {
+                    MULT(z, a, z);
+                }
+            }
+            if (--i < 0) {
+                break;
+            }
+            bi = b->ob_digit[i];
+            bit = (digit)1 << (PyLong_SHIFT-1);
+        }
+    }
+    else {
+        /* Left-to-right 5-ary exponentiation (HAC Algorithm 14.82) */
+        Py_INCREF(z);           /* still holds 1L */
+        table[0] = z;
+        for (i = 1; i < 32; ++i)
+            MULT(table[i-1], a, table[i]);
+
+        for (i = Py_SIZE(b) - 1; i >= 0; --i) {
+            const digit bi = b->ob_digit[i];
+
+            for (j = PyLong_SHIFT - 5; j >= 0; j -= 5) {
+                const int index = (bi >> j) & 0x1f;
+                for (k = 0; k < 5; ++k)
+                    MULT(z, z, z);
+                if (index)
+                    MULT(z, table[index], z);
+            }
+        }
+    }
+
+    if (negativeOutput && (Py_SIZE(z) != 0)) {
+        temp = (PyLongObject *)long_sub(z, c);
+        if (temp == NULL)
+            goto Error;
+        Py_DECREF(z);
+        z = temp;
+        temp = NULL;
+    }
+    goto Done;
+
+  Error:
+    Py_CLEAR(z);
+    /* fall through */
+  Done:
+    if (Py_SIZE(b) > FIVEARY_CUTOFF) {
+        for (i = 0; i < 32; ++i)
+            Py_XDECREF(table[i]);
+    }
+    Py_DECREF(a);
+    Py_DECREF(b);
+    Py_XDECREF(c);
+    Py_XDECREF(temp);
+    return (PyObject *)z;
+}
+
+static PyObject *
+long_invert(PyLongObject *v)
+{
+    /* Implement ~x as -(x+1) */
+    PyLongObject *x;
+    if (IS_MEDIUM_VALUE(v))
+        return _PyLong_FromSTwoDigits(~medium_value(v));
+    x = (PyLongObject *) long_add(v, (PyLongObject *)_PyLong_GetOne());
+    if (x == NULL)
+        return NULL;
+    _PyLong_Negate(&x);
+    /* No need for maybe_small_long here, since any small
+       longs will have been caught in the Py_SIZE <= 1 fast path. */
+    return (PyObject *)x;
+}
+
+static PyObject *
+long_neg(PyLongObject *v)
+{
+    PyLongObject *z;
+    if (IS_MEDIUM_VALUE(v))
+        return _PyLong_FromSTwoDigits(-medium_value(v));
+    z = (PyLongObject *)_PyLong_Copy(v);
+    if (z != NULL)
+        Py_SET_SIZE(z, -(Py_SIZE(v)));
+    return (PyObject *)z;
+}
+
+static PyObject *
+long_abs(PyLongObject *v)
+{
+    if (Py_SIZE(v) < 0)
+        return long_neg(v);
+    else
+        return long_long((PyObject *)v);
+}
+
+static int
+long_bool(PyLongObject *v)
+{
+    return Py_SIZE(v) != 0;
+}
+
+/* wordshift, remshift = divmod(shiftby, PyLong_SHIFT) */
+static int
+divmod_shift(PyObject *shiftby, Py_ssize_t *wordshift, digit *remshift)
+{
+    assert(PyLong_Check(shiftby));
+    assert(Py_SIZE(shiftby) >= 0);
+    Py_ssize_t lshiftby = PyLong_AsSsize_t((PyObject *)shiftby);
+    if (lshiftby >= 0) {
+        *wordshift = lshiftby / PyLong_SHIFT;
+        *remshift = lshiftby % PyLong_SHIFT;
+        return 0;
+    }
+    /* PyLong_Check(shiftby) is true and Py_SIZE(shiftby) >= 0, so it must
+       be that PyLong_AsSsize_t raised an OverflowError. */
 //    assert(PyErr_ExceptionMatches(PyExc_OverflowError));
 //    PyErr_Clear();
-//    PyLongObject *wordshift_obj = divrem1((PyLongObject *)shiftby, PyLong_SHIFT, remshift);
-//    if (wordshift_obj == NULL) {
-//        return -1;
-//    }
-//    *wordshift = PyLong_AsSsize_t((PyObject *)wordshift_obj);
-//    Py_DECREF(wordshift_obj);
-//    if (*wordshift >= 0 && *wordshift < PY_SSIZE_T_MAX / (Py_ssize_t)sizeof(digit)) {
-//        return 0;
-//    }
+    PyLongObject *wordshift_obj = divrem1((PyLongObject *)shiftby, PyLong_SHIFT, remshift);
+    if (wordshift_obj == NULL) {
+        return -1;
+    }
+    *wordshift = PyLong_AsSsize_t((PyObject *)wordshift_obj);
+    Py_DECREF(wordshift_obj);
+    if (*wordshift >= 0 && *wordshift < PY_SSIZE_T_MAX / (Py_ssize_t)sizeof(digit)) {
+        return 0;
+    }
 //    PyErr_Clear();
-//    /* Clip the value.  With such large wordshift the right shift
-//       returns 0 and the left shift raises an error in _PyLong_New(). */
-//    *wordshift = PY_SSIZE_T_MAX / sizeof(digit);
-//    *remshift = 0;
-//    return 0;
-//}
-//
-//static PyObject *
-//long_rshift1(PyLongObject *a, Py_ssize_t wordshift, digit remshift)
-//{
-//    PyLongObject *z = NULL;
-//    Py_ssize_t newsize, hishift, i, j;
-//    digit lomask, himask;
-//
-//    if (Py_SIZE(a) < 0) {
-//        /* Right shifting negative numbers is harder */
-//        PyLongObject *a1, *a2;
-//        a1 = (PyLongObject *) long_invert(a);
-//        if (a1 == NULL)
-//            return NULL;
-//        a2 = (PyLongObject *) long_rshift1(a1, wordshift, remshift);
-//        Py_DECREF(a1);
-//        if (a2 == NULL)
-//            return NULL;
-//        z = (PyLongObject *) long_invert(a2);
-//        Py_DECREF(a2);
-//    }
-//    else {
-//        newsize = Py_SIZE(a) - wordshift;
-//        if (newsize <= 0)
-//            return PyLong_FromLong(0);
-//        hishift = PyLong_SHIFT - remshift;
-//        lomask = ((digit)1 << hishift) - 1;
-//        himask = PyLong_MASK ^ lomask;
-//        z = _PyLong_New(newsize);
-//        if (z == NULL)
-//            return NULL;
-//        for (i = 0, j = wordshift; i < newsize; i++, j++) {
-//            z->ob_digit[i] = (a->ob_digit[j] >> remshift) & lomask;
-//            if (i+1 < newsize)
-//                z->ob_digit[i] |= (a->ob_digit[j+1] << hishift) & himask;
-//        }
-//        z = maybe_small_long(long_normalize(z));
-//    }
-//    return (PyObject *)z;
-//}
-//
-//static PyObject *
-//long_rshift(PyObject *a, PyObject *b)
-//{
-//    Py_ssize_t wordshift;
-//    digit remshift;
-//
-//    CHECK_BINOP(a, b);
-//
-//    if (Py_SIZE(b) < 0) {
-//        PyErr_SetString(PyExc_ValueError, "negative shift count");
-//        return NULL;
-//    }
-//    if (Py_SIZE(a) == 0) {
-//        return PyLong_FromLong(0);
-//    }
-//    if (divmod_shift(b, &wordshift, &remshift) < 0)
-//        return NULL;
-//    return long_rshift1((PyLongObject *)a, wordshift, remshift);
-//}
-//
-///* Return a >> shiftby. */
-//PyObject *
-//_PyLong_Rshift(PyObject *a, size_t shiftby)
-//{
-//    Py_ssize_t wordshift;
-//    digit remshift;
-//
-//    assert(PyLong_Check(a));
-//    if (Py_SIZE(a) == 0) {
-//        return PyLong_FromLong(0);
-//    }
-//    wordshift = shiftby / PyLong_SHIFT;
-//    remshift = shiftby % PyLong_SHIFT;
-//    return long_rshift1((PyLongObject *)a, wordshift, remshift);
-//}
-//
-//static PyObject *
-//long_lshift1(PyLongObject *a, Py_ssize_t wordshift, digit remshift)
-//{
-//    /* This version due to Tim Peters */
-//    PyLongObject *z = NULL;
-//    Py_ssize_t oldsize, newsize, i, j;
-//    twodigits accum;
-//
-//    oldsize = Py_ABS(Py_SIZE(a));
-//    newsize = oldsize + wordshift;
-//    if (remshift)
-//        ++newsize;
-//    z = _PyLong_New(newsize);
-//    if (z == NULL)
-//        return NULL;
-//    if (Py_SIZE(a) < 0) {
-//        assert(Py_REFCNT(z) == 1);
-//        Py_SET_SIZE(z, -Py_SIZE(z));
-//    }
-//    for (i = 0; i < wordshift; i++)
-//        z->ob_digit[i] = 0;
-//    accum = 0;
-//    for (i = wordshift, j = 0; j < oldsize; i++, j++) {
-//        accum |= (twodigits)a->ob_digit[j] << remshift;
-//        z->ob_digit[i] = (digit)(accum & PyLong_MASK);
-//        accum >>= PyLong_SHIFT;
-//    }
-//    if (remshift)
-//        z->ob_digit[newsize-1] = (digit)accum;
-//    else
-//        assert(!accum);
-//    z = long_normalize(z);
-//    return (PyObject *) maybe_small_long(z);
-//}
-//
-//static PyObject *
-//long_lshift(PyObject *a, PyObject *b)
-//{
-//    Py_ssize_t wordshift;
-//    digit remshift;
-//
-//    CHECK_BINOP(a, b);
-//
-//    if (Py_SIZE(b) < 0) {
-//        PyErr_SetString(PyExc_ValueError, "negative shift count");
-//        return NULL;
-//    }
-//    if (Py_SIZE(a) == 0) {
-//        return PyLong_FromLong(0);
-//    }
-//    if (divmod_shift(b, &wordshift, &remshift) < 0)
-//        return NULL;
-//    return long_lshift1((PyLongObject *)a, wordshift, remshift);
-//}
-//
-///* Return a << shiftby. */
-//PyObject *
-//_PyLong_Lshift(PyObject *a, size_t shiftby)
-//{
-//    Py_ssize_t wordshift;
-//    digit remshift;
-//
-//    assert(PyLong_Check(a));
-//    if (Py_SIZE(a) == 0) {
-//        return PyLong_FromLong(0);
-//    }
-//    wordshift = shiftby / PyLong_SHIFT;
-//    remshift = shiftby % PyLong_SHIFT;
-//    return long_lshift1((PyLongObject *)a, wordshift, remshift);
-//}
-//
-///* Compute two's complement of digit vector a[0:m], writing result to
-//   z[0:m].  The digit vector a need not be normalized, but should not
-//   be entirely zero.  a and z may point to the same digit vector. */
-//
-//static void
-//v_complement(digit *z, digit *a, Py_ssize_t m)
-//{
-//    Py_ssize_t i;
-//    digit carry = 1;
-//    for (i = 0; i < m; ++i) {
-//        carry += a[i] ^ PyLong_MASK;
-//        z[i] = carry & PyLong_MASK;
-//        carry >>= PyLong_SHIFT;
-//    }
-//    assert(carry == 0);
-//}
-//
-///* Bitwise and/xor/or operations */
-//
-//static PyObject *
-//long_bitwise(PyLongObject *a,
-//             char op,  /* '&', '|', '^' */
-//             PyLongObject *b)
-//{
-//    int nega, negb, negz;
-//    Py_ssize_t size_a, size_b, size_z, i;
-//    PyLongObject *z;
-//
-//    /* Bitwise operations for negative numbers operate as though
-//       on a two's complement representation.  So convert arguments
-//       from sign-magnitude to two's complement, and convert the
-//       result back to sign-magnitude at the end. */
-//
-//    /* If a is negative, replace it by its two's complement. */
-//    size_a = Py_ABS(Py_SIZE(a));
-//    nega = Py_SIZE(a) < 0;
-//    if (nega) {
-//        z = _PyLong_New(size_a);
-//        if (z == NULL)
-//            return NULL;
-//        v_complement(z->ob_digit, a->ob_digit, size_a);
-//        a = z;
-//    }
-//    else
-//        /* Keep reference count consistent. */
-//        Py_INCREF(a);
-//
-//    /* Same for b. */
-//    size_b = Py_ABS(Py_SIZE(b));
-//    negb = Py_SIZE(b) < 0;
-//    if (negb) {
-//        z = _PyLong_New(size_b);
-//        if (z == NULL) {
-//            Py_DECREF(a);
-//            return NULL;
-//        }
-//        v_complement(z->ob_digit, b->ob_digit, size_b);
-//        b = z;
-//    }
-//    else
-//        Py_INCREF(b);
-//
-//    /* Swap a and b if necessary to ensure size_a >= size_b. */
-//    if (size_a < size_b) {
-//        z = a; a = b; b = z;
-//        size_z = size_a; size_a = size_b; size_b = size_z;
-//        negz = nega; nega = negb; negb = negz;
-//    }
-//
-//    /* JRH: The original logic here was to allocate the result value (z)
-//       as the longer of the two operands.  However, there are some cases
-//       where the result is guaranteed to be shorter than that: AND of two
-//       positives, OR of two negatives: use the shorter number.  AND with
-//       mixed signs: use the positive number.  OR with mixed signs: use the
-//       negative number.
-//    */
-//    switch (op) {
-//    case '^':
-//        negz = nega ^ negb;
-//        size_z = size_a;
-//        break;
-//    case '&':
-//        negz = nega & negb;
-//        size_z = negb ? size_a : size_b;
-//        break;
-//    case '|':
-//        negz = nega | negb;
-//        size_z = negb ? size_b : size_a;
-//        break;
-//    default:
-//        Py_UNREACHABLE();
-//    }
-//
-//    /* We allow an extra digit if z is negative, to make sure that
-//       the final two's complement of z doesn't overflow. */
-//    z = _PyLong_New(size_z + negz);
-//    if (z == NULL) {
-//        Py_DECREF(a);
-//        Py_DECREF(b);
-//        return NULL;
-//    }
-//
-//    /* Compute digits for overlap of a and b. */
-//    switch(op) {
-//    case '&':
-//        for (i = 0; i < size_b; ++i)
-//            z->ob_digit[i] = a->ob_digit[i] & b->ob_digit[i];
-//        break;
-//    case '|':
-//        for (i = 0; i < size_b; ++i)
-//            z->ob_digit[i] = a->ob_digit[i] | b->ob_digit[i];
-//        break;
-//    case '^':
-//        for (i = 0; i < size_b; ++i)
-//            z->ob_digit[i] = a->ob_digit[i] ^ b->ob_digit[i];
-//        break;
-//    default:
-//        Py_UNREACHABLE();
-//    }
-//
-//    /* Copy any remaining digits of a, inverting if necessary. */
-//    if (op == '^' && negb)
-//        for (; i < size_z; ++i)
-//            z->ob_digit[i] = a->ob_digit[i] ^ PyLong_MASK;
-//    else if (i < size_z)
-//        memcpy(&z->ob_digit[i], &a->ob_digit[i],
-//               (size_z-i)*sizeof(digit));
-//
-//    /* Complement result if negative. */
-//    if (negz) {
-//        Py_SET_SIZE(z, -(Py_SIZE(z)));
-//        z->ob_digit[size_z] = PyLong_MASK;
-//        v_complement(z->ob_digit, z->ob_digit, size_z+1);
-//    }
-//
-//    Py_DECREF(a);
-//    Py_DECREF(b);
-//    return (PyObject *)maybe_small_long(long_normalize(z));
-//}
-//
-//static PyObject *
-//long_and(PyObject *a, PyObject *b)
-//{
-//    CHECK_BINOP(a, b);
-//    PyLongObject *x = (PyLongObject*)a;
-//    PyLongObject *y = (PyLongObject*)b;
-//    if (IS_MEDIUM_VALUE(x) && IS_MEDIUM_VALUE(y)) {
-//        return _PyLong_FromSTwoDigits(medium_value(x) & medium_value(y));
-//    }
-//    return long_bitwise(x, '&', y);
-//}
-//
-//static PyObject *
-//long_xor(PyObject *a, PyObject *b)
-//{
-//    CHECK_BINOP(a, b);
-//    PyLongObject *x = (PyLongObject*)a;
-//    PyLongObject *y = (PyLongObject*)b;
-//    if (IS_MEDIUM_VALUE(x) && IS_MEDIUM_VALUE(y)) {
-//        return _PyLong_FromSTwoDigits(medium_value(x) ^ medium_value(y));
-//    }
-//    return long_bitwise(x, '^', y);
-//}
-//
-//static PyObject *
-//long_or(PyObject *a, PyObject *b)
-//{
-//    CHECK_BINOP(a, b);
-//    PyLongObject *x = (PyLongObject*)a;
-//    PyLongObject *y = (PyLongObject*)b;
-//    if (IS_MEDIUM_VALUE(x) && IS_MEDIUM_VALUE(y)) {
-//        return _PyLong_FromSTwoDigits(medium_value(x) | medium_value(y));
-//    }
-//    return long_bitwise(x, '|', y);
-//}
-//
+    /* Clip the value.  With such large wordshift the right shift
+       returns 0 and the left shift raises an error in _PyLong_New(). */
+    *wordshift = PY_SSIZE_T_MAX / sizeof(digit);
+    *remshift = 0;
+    return 0;
+}
+
+static PyObject *
+long_rshift1(PyLongObject *a, Py_ssize_t wordshift, digit remshift)
+{
+    PyLongObject *z = NULL;
+    Py_ssize_t newsize, hishift, i, j;
+    digit lomask, himask;
+
+    if (Py_SIZE(a) < 0) {
+        /* Right shifting negative numbers is harder */
+        PyLongObject *a1, *a2;
+        a1 = (PyLongObject *) long_invert(a);
+        if (a1 == NULL)
+            return NULL;
+        a2 = (PyLongObject *) long_rshift1(a1, wordshift, remshift);
+        Py_DECREF(a1);
+        if (a2 == NULL)
+            return NULL;
+        z = (PyLongObject *) long_invert(a2);
+        Py_DECREF(a2);
+    }
+    else {
+        newsize = Py_SIZE(a) - wordshift;
+        if (newsize <= 0)
+            return PyLong_FromLong(0);
+        hishift = PyLong_SHIFT - remshift;
+        lomask = ((digit)1 << hishift) - 1;
+        himask = PyLong_MASK ^ lomask;
+        z = _PyLong_New(newsize);
+        if (z == NULL)
+            return NULL;
+        for (i = 0, j = wordshift; i < newsize; i++, j++) {
+            z->ob_digit[i] = (a->ob_digit[j] >> remshift) & lomask;
+            if (i+1 < newsize)
+                z->ob_digit[i] |= (a->ob_digit[j+1] << hishift) & himask;
+        }
+        z = maybe_small_long(long_normalize(z));
+    }
+    return (PyObject *)z;
+}
+
+static PyObject *
+long_rshift(PyObject *a, PyObject *b)
+{
+    Py_ssize_t wordshift;
+    digit remshift;
+
+    CHECK_BINOP(a, b);
+
+    if (Py_SIZE(b) < 0) {
+        PyErr_SetString(PyExc_ValueError, "negative shift count");
+        return NULL;
+    }
+    if (Py_SIZE(a) == 0) {
+        return PyLong_FromLong(0);
+    }
+    if (divmod_shift(b, &wordshift, &remshift) < 0)
+        return NULL;
+    return long_rshift1((PyLongObject *)a, wordshift, remshift);
+}
+
+/* Return a >> shiftby. */
+PyObject *
+_PyLong_Rshift(PyObject *a, size_t shiftby)
+{
+    Py_ssize_t wordshift;
+    digit remshift;
+
+    assert(PyLong_Check(a));
+    if (Py_SIZE(a) == 0) {
+        return PyLong_FromLong(0);
+    }
+    wordshift = shiftby / PyLong_SHIFT;
+    remshift = shiftby % PyLong_SHIFT;
+    return long_rshift1((PyLongObject *)a, wordshift, remshift);
+}
+
+static PyObject *
+long_lshift1(PyLongObject *a, Py_ssize_t wordshift, digit remshift)
+{
+    /* This version due to Tim Peters */
+    PyLongObject *z = NULL;
+    Py_ssize_t oldsize, newsize, i, j;
+    twodigits accum;
+
+    oldsize = Py_ABS(Py_SIZE(a));
+    newsize = oldsize + wordshift;
+    if (remshift)
+        ++newsize;
+    z = _PyLong_New(newsize);
+    if (z == NULL)
+        return NULL;
+    if (Py_SIZE(a) < 0) {
+        assert(Py_REFCNT(z) == 1);
+        Py_SET_SIZE(z, -Py_SIZE(z));
+    }
+    for (i = 0; i < wordshift; i++)
+        z->ob_digit[i] = 0;
+    accum = 0;
+    for (i = wordshift, j = 0; j < oldsize; i++, j++) {
+        accum |= (twodigits)a->ob_digit[j] << remshift;
+        z->ob_digit[i] = (digit)(accum & PyLong_MASK);
+        accum >>= PyLong_SHIFT;
+    }
+    if (remshift)
+        z->ob_digit[newsize-1] = (digit)accum;
+    else
+        assert(!accum);
+    z = long_normalize(z);
+    return (PyObject *) maybe_small_long(z);
+}
+
+static PyObject *
+long_lshift(PyObject *a, PyObject *b)
+{
+    Py_ssize_t wordshift;
+    digit remshift;
+
+    CHECK_BINOP(a, b);
+
+    if (Py_SIZE(b) < 0) {
+        PyErr_SetString(PyExc_ValueError, "negative shift count");
+        return NULL;
+    }
+    if (Py_SIZE(a) == 0) {
+        return PyLong_FromLong(0);
+    }
+    if (divmod_shift(b, &wordshift, &remshift) < 0)
+        return NULL;
+    return long_lshift1((PyLongObject *)a, wordshift, remshift);
+}
+
+/* Return a << shiftby. */
+PyObject *
+_PyLong_Lshift(PyObject *a, size_t shiftby)
+{
+    Py_ssize_t wordshift;
+    digit remshift;
+
+    assert(PyLong_Check(a));
+    if (Py_SIZE(a) == 0) {
+        return PyLong_FromLong(0);
+    }
+    wordshift = shiftby / PyLong_SHIFT;
+    remshift = shiftby % PyLong_SHIFT;
+    return long_lshift1((PyLongObject *)a, wordshift, remshift);
+}
+
+/* Compute two's complement of digit vector a[0:m], writing result to
+   z[0:m].  The digit vector a need not be normalized, but should not
+   be entirely zero.  a and z may point to the same digit vector. */
+
+static void
+v_complement(digit *z, digit *a, Py_ssize_t m)
+{
+    Py_ssize_t i;
+    digit carry = 1;
+    for (i = 0; i < m; ++i) {
+        carry += a[i] ^ PyLong_MASK;
+        z[i] = carry & PyLong_MASK;
+        carry >>= PyLong_SHIFT;
+    }
+    assert(carry == 0);
+}
+
+/* Bitwise and/xor/or operations */
+
+static PyObject *
+long_bitwise(PyLongObject *a,
+             char op,  /* '&', '|', '^' */
+             PyLongObject *b)
+{
+    int nega, negb, negz;
+    Py_ssize_t size_a, size_b, size_z, i;
+    PyLongObject *z;
+
+    /* Bitwise operations for negative numbers operate as though
+       on a two's complement representation.  So convert arguments
+       from sign-magnitude to two's complement, and convert the
+       result back to sign-magnitude at the end. */
+
+    /* If a is negative, replace it by its two's complement. */
+    size_a = Py_ABS(Py_SIZE(a));
+    nega = Py_SIZE(a) < 0;
+    if (nega) {
+        z = _PyLong_New(size_a);
+        if (z == NULL)
+            return NULL;
+        v_complement(z->ob_digit, a->ob_digit, size_a);
+        a = z;
+    }
+    else
+        /* Keep reference count consistent. */
+        Py_INCREF(a);
+
+    /* Same for b. */
+    size_b = Py_ABS(Py_SIZE(b));
+    negb = Py_SIZE(b) < 0;
+    if (negb) {
+        z = _PyLong_New(size_b);
+        if (z == NULL) {
+            Py_DECREF(a);
+            return NULL;
+        }
+        v_complement(z->ob_digit, b->ob_digit, size_b);
+        b = z;
+    }
+    else
+        Py_INCREF(b);
+
+    /* Swap a and b if necessary to ensure size_a >= size_b. */
+    if (size_a < size_b) {
+        z = a; a = b; b = z;
+        size_z = size_a; size_a = size_b; size_b = size_z;
+        negz = nega; nega = negb; negb = negz;
+    }
+
+    /* JRH: The original logic here was to allocate the result value (z)
+       as the longer of the two operands.  However, there are some cases
+       where the result is guaranteed to be shorter than that: AND of two
+       positives, OR of two negatives: use the shorter number.  AND with
+       mixed signs: use the positive number.  OR with mixed signs: use the
+       negative number.
+    */
+    switch (op) {
+    case '^':
+        negz = nega ^ negb;
+        size_z = size_a;
+        break;
+    case '&':
+        negz = nega & negb;
+        size_z = negb ? size_a : size_b;
+        break;
+    case '|':
+        negz = nega | negb;
+        size_z = negb ? size_b : size_a;
+        break;
+    default:
+        Py_UNREACHABLE();
+    }
+
+    /* We allow an extra digit if z is negative, to make sure that
+       the final two's complement of z doesn't overflow. */
+    z = _PyLong_New(size_z + negz);
+    if (z == NULL) {
+        Py_DECREF(a);
+        Py_DECREF(b);
+        return NULL;
+    }
+
+    /* Compute digits for overlap of a and b. */
+    switch(op) {
+    case '&':
+        for (i = 0; i < size_b; ++i)
+            z->ob_digit[i] = a->ob_digit[i] & b->ob_digit[i];
+        break;
+    case '|':
+        for (i = 0; i < size_b; ++i)
+            z->ob_digit[i] = a->ob_digit[i] | b->ob_digit[i];
+        break;
+    case '^':
+        for (i = 0; i < size_b; ++i)
+            z->ob_digit[i] = a->ob_digit[i] ^ b->ob_digit[i];
+        break;
+    default:
+        Py_UNREACHABLE();
+    }
+
+    /* Copy any remaining digits of a, inverting if necessary. */
+    if (op == '^' && negb)
+        for (; i < size_z; ++i)
+            z->ob_digit[i] = a->ob_digit[i] ^ PyLong_MASK;
+    else if (i < size_z)
+        memcpy(&z->ob_digit[i], &a->ob_digit[i],
+               (size_z-i)*sizeof(digit));
+
+    /* Complement result if negative. */
+    if (negz) {
+        Py_SET_SIZE(z, -(Py_SIZE(z)));
+        z->ob_digit[size_z] = PyLong_MASK;
+        v_complement(z->ob_digit, z->ob_digit, size_z+1);
+    }
+
+    Py_DECREF(a);
+    Py_DECREF(b);
+    return (PyObject *)maybe_small_long(long_normalize(z));
+}
+
+static PyObject *
+long_and(PyObject *a, PyObject *b)
+{
+    CHECK_BINOP(a, b);
+    PyLongObject *x = (PyLongObject*)a;
+    PyLongObject *y = (PyLongObject*)b;
+    if (IS_MEDIUM_VALUE(x) && IS_MEDIUM_VALUE(y)) {
+        return _PyLong_FromSTwoDigits(medium_value(x) & medium_value(y));
+    }
+    return long_bitwise(x, '&', y);
+}
+
+static PyObject *
+long_xor(PyObject *a, PyObject *b)
+{
+    CHECK_BINOP(a, b);
+    PyLongObject *x = (PyLongObject*)a;
+    PyLongObject *y = (PyLongObject*)b;
+    if (IS_MEDIUM_VALUE(x) && IS_MEDIUM_VALUE(y)) {
+        return _PyLong_FromSTwoDigits(medium_value(x) ^ medium_value(y));
+    }
+    return long_bitwise(x, '^', y);
+}
+
+static PyObject *
+long_or(PyObject *a, PyObject *b)
+{
+    CHECK_BINOP(a, b);
+    PyLongObject *x = (PyLongObject*)a;
+    PyLongObject *y = (PyLongObject*)b;
+    if (IS_MEDIUM_VALUE(x) && IS_MEDIUM_VALUE(y)) {
+        return _PyLong_FromSTwoDigits(medium_value(x) | medium_value(y));
+    }
+    return long_bitwise(x, '|', y);
+}
+
 static PyObject *
 long_long(PyObject *v)
 {
@@ -5049,17 +5071,17 @@ long_long(PyObject *v)
 //    Py_XDECREF(d);
 //    return NULL;
 //}
-//
-//static PyObject *
-//long_float(PyObject *v)
-//{
-//    double result;
-//    result = PyLong_AsDouble(v);
-//    if (result == -1.0 && PyErr_Occurred())
-//        return NULL;
-//    return PyFloat_FromDouble(result);
-//}
-//
+
+static PyObject *
+long_float(PyObject *v)
+{
+    double result;
+    result = PyLong_AsDouble(v);
+    if (result == -1.0 && PyErr_Occurred())
+        return NULL;
+    return PyFloat_FromDouble(result);
+}
+
 //static PyObject *
 //long_subtype_new(PyTypeObject *type, PyObject *x, PyObject *obase);
 //
@@ -5726,33 +5748,46 @@ long_long(PyObject *v)
 //4");
 //
 
-int long_leq(PyLongObject* a, PyLongObject* b) {
-    return long_compare(a, b) <= 0;
-}
+#define CMP_LONG(name, symbol) CMP_OP(name, symbol, long)
 
-int long_eq(PyLongObject* a, PyLongObject* b) {
-    return long_compare(a, b) == 0;
-}
+CMP_LONG(lt, <)
+CMP_LONG(lte, <=)
+CMP_LONG(eq, ==)
+CMP_LONG(neq, !=)
+CMP_LONG(gt, >)
+CMP_LONG(gte, >=)
+
+
+//int long_eq(PyLongObject* a, PyLongObject* b) {
+//    return  long_compare(a, b) == 0;
+//}
+//
+//int long_eq_direct(PyLongObject* a, PyLongObject* b) {
+//    int rv = long_eq(a, b);
+//    Py_DECREF(b);
+//    Py_DECREF(a);
+//    return rv;
+//}
 
 static PyNumberMethods long_as_number = {
     (binaryfunc)long_add,       /*nb_add*/
     (binaryfunc)long_sub,       /*nb_subtract*/
-    0, // (binaryfunc)long_mul,       /*nb_multiply*/
-    0, // long_mod,                   /*nb_remainder*/
-    0, // long_divmod,                /*nb_divmod*/
-    0, // long_pow,                   /*nb_power*/
-    0, // (unaryfunc)long_neg,        /*nb_negative*/
-    0, // long_long,                  /*tp_positive*/
-    0, // (unaryfunc)long_abs,        /*tp_absolute*/
-    0, // (inquiry)long_bool,         /*tp_bool*/
-    0, // (unaryfunc)long_invert,     /*nb_invert*/
-    0, // long_lshift,                /*nb_lshift*/
-    0, // long_rshift,                /*nb_rshift*/
-    0, // long_and,                   /*nb_and*/
-    0, // long_xor,                   /*nb_xor*/
-    0, // long_or,                    /*nb_or*/
-    0, // long_long,                  /*nb_int*/
-    0, // long_float,                 /*nb_float*/
+    (binaryfunc)long_mul,       /*nb_multiply*/
+    long_mod,                   /*nb_remainder*/
+    long_divmod,                /*nb_divmod*/
+    long_pow,                   /*nb_power*/
+    (unaryfunc)long_neg,        /*nb_negative*/
+    long_long,                  /*nb_positive*/
+    (unaryfunc)long_abs,        /*nb_absolute*/
+    (inquiry)long_bool,         /*nb_bool*/
+    (unaryfunc)long_invert,     /*nb_invert*/
+    long_lshift,                /*nb_lshift*/
+    long_rshift,                /*nb_rshift*/
+    long_and,                   /*nb_and*/
+    long_xor,                   /*nb_xor*/
+    long_or,                    /*nb_or*/
+    long_long,                  /*nb_int*/
+    long_float,                 /*nb_float*/
     0,                          /* nb_inplace_add */
     0,                          /* nb_inplace_subtract */
     0,                          /* nb_inplace_multiply */
@@ -5763,8 +5798,8 @@ static PyNumberMethods long_as_number = {
     0,                          /* nb_inplace_and */
     0,                          /* nb_inplace_xor */
     0,                          /* nb_inplace_or */
-    0, // long_div,                   /* nb_floor_divide */
-    0, // long_true_divide,           /* nb_true_divide */
+    long_div,                   /* nb_floor_divide */
+    long_true_divide,           /* nb_true_divide */
     0,                          /* nb_inplace_floor_divide */
     0,                          /* nb_inplace_true_divide */
     long_long,                  /* nb_index */
@@ -5781,13 +5816,17 @@ Type PyLong_Type = {
         0,
         0,
 
-        (BinTest) long_eq, /* eq */
-        (BinTest) long_leq, /* leq */
+        (BinTest) long_lt,  /* lt */
+        (BinTest) long_lte, /* lte */
+        (BinTest) long_eq,  /* eq */
+        (BinTest) long_neq, /* neq */
+        (BinTest) long_gt,  /* gt */
+        (BinTest) long_gte, /* gte */
 };
 
-#define SMALL_LONG(x) {1, &PyLong_Type, 1, {x}}
-#define NEG_SMALL_LONG(x) {1, &PyLong_Type, -1, {x}}
-#define ZERO {1, &PyLong_Type, 0, {0}}
+#define SMALL_LONG(x) {100, &PyLong_Type, 1, {x}}
+#define NEG_SMALL_LONG(x) {100, &PyLong_Type, -1, {x}}
+#define ZERO {100, &PyLong_Type, 0, {0}}
 
 PyLongObject small_ints[NSMALLNEGINTS + NSMALLPOSINTS] = {
         NEG_SMALL_LONG(5),

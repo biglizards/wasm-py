@@ -1,9 +1,7 @@
-//
-// Created by dave on 12/11/2021.
-//
-
 #ifndef WASM_PY_GLUE_H
 #define WASM_PY_GLUE_H
+
+#define NDEBUG
 
 #import <stdint.h>
 #include <assert.h>
@@ -52,9 +50,10 @@ typedef Py_intptr_t     Py_ssize_t;
 #define LONG_MAX __LONG_MAX__
 
 #define PyAPI_FUNC(symbol) symbol
-// change: usually it's `extern symbol`. I don't know why this change is needed.
 #define PyAPI_DATA(symbol) extern symbol
 #define PyTypeObject Type
+
+//#define assert(cond) do {} while (0)
 
 #define PANIC(str) do {printf(str "\n"); assert(0); exit(-1);} while (0)
 // black macro magic from https://stackoverflow.com/a/2670919
@@ -78,6 +77,7 @@ typedef Py_intptr_t     Py_ssize_t;
 #define PyErr_BadInternalCall() PANIC("bad internal call!")
 #define PyErr_Format(exception, string, ...) printf(string, __VA_ARGS__); PANIC("\nexception raised!")
 
+#define PyErr_BadArgument() PANIC("error: bad argument");
 
 #define eprintf(...) fprintf (stderr, __VA_ARGS__)
 static inline void* PyErr_NoMemory() {
@@ -85,5 +85,47 @@ static inline void* PyErr_NoMemory() {
 }
 
 #define TYPE_HEAD PyVarObject_HEAD_INIT(NULL, 0)
+#define PyObject_Malloc malloc
+#define Py_LOCAL_INLINE(type) static inline type
+#define Py_ARITHMETIC_RIGHT_SHIFT(TYPE, I, J) ((I) >> (J))
+
+/* Two gcc extensions.
+   &a[0] degrades to a pointer: a different type from an array */
+#define Py_ARRAY_LENGTH(array) \
+    (sizeof(array) / sizeof((array)[0]) \
+     + Py_BUILD_ASSERT_EXPR(!__builtin_types_compatible_p(typeof(array), \
+                                                          typeof(&(array)[0]))))
+
+#define PyErr_Occurred() 0
+
+#define Py_IS_INFINITY(X) isinf(X)
+#define Py_IS_NAN(X) isnan(X)
+
+/* Minimum value between x and y */
+#define Py_MIN(x, y) (((x) > (y)) ? (y) : (x))
+
+/* Maximum value between x and y */
+#define Py_MAX(x, y) (((x) > (y)) ? (x) : (y))
+
+/* Absolute value of the number x */
+#define Py_ABS(x) ((x) < 0 ? -(x) : (x))
+
+#define Py_RETURN_NOTIMPLEMENTED PANIC("returning not implemented!")
+#define Py_UNREACHABLE() PANIC("unreachable code reached!")
+
+#define glue(x, y) x##y
+#define glue3(x, y, z) x##y##z
+#define CMP_OP(name, symbol, type) int glue(type,_##name)(PyLongObject* a, PyLongObject* b) { \
+    return glue(type,_compare)(a, b) symbol 0;\
+}\
+int glue3(type,_##name,_direct)(PyLongObject* a, PyLongObject* b) {\
+    int rv = long_##name(a, b);\
+    Py_DECREF(b);\
+    Py_DECREF(a);\
+    return rv;\
+}
+
+
+
 
 #endif //WASM_PY_GLUE_H

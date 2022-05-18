@@ -8,6 +8,9 @@
 #include "cpython/longintrepr.h"
 #include "cpython/longobject.h"
 #include "cpython/tupleobject.h"
+#include "cpython/noneobject.h"
+#include "cpython/boolobject.h"
+#include "cpython/floatobject.h"
 
 //#include "Python.h"
 
@@ -35,27 +38,97 @@
 
 // todo: there's some weird subclassing stuff going on here in CPython
 #define BINARY_FUNC(ret, name, path) ret name(PyObject* a, PyObject* b) { \
-    if (a->type->path != NULL) return a->type->path(a,b);                 \
-    if (b->type->path != NULL) return b->type->path(a,b);                 \
-    PANIC(#name "(" #path ") Not implemented!");                          \
+    ret rv;                                                               \
+    if (a->type->path != NULL) rv = a->type->path(a,b);                   \
+    else if (b->type->path != NULL) rv = b->type->path(a,b);              \
+    else PANIC(#name "(" #path ") Not implemented!");                     \
+    Py_DECREF(b); Py_DECREF(a);                                           \
+    return rv;                                                            \
 }
 
 #define BINARY_FUNC2(ret, name, lens, path) ret name(PyObject* a, PyObject* b) { \
-    if (a->type->lens != NULL &&  a->type->lens->path != NULL) return a->type->lens->path(a,b); \
-    if (b->type->lens != NULL &&  b->type->lens->path != NULL) return b->type->lens->path(a,b); \
-    PANIC(#name "(" #lens "->" #path ") Not implemented!");                                 \
+    ret rv;                                                                      \
+    if (a->type->lens != NULL && a->type->lens->path != NULL) rv = a->type->lens->path(a,b);                   \
+    else if (b->type->lens != NULL && b->type->lens->path != NULL) rv = b->type->lens->path(a,b);               \
+    else PANIC(#name "(" #path ") Not implemented!");                     \
+    Py_DECREF(b); Py_DECREF(a);                                           \
+    return rv;                                                            \
 }
 
+#define TRINARY_FUNC2(ret, name, lens, path) ret name(PyObject* a, PyObject* b, PyObject* c) { \
+    ret rv;                                                                      \
+    if (a->type->lens != NULL && a->type->lens->path != NULL) rv = a->type->lens->path(a,b,c);                   \
+    else if (b->type->lens != NULL && b->type->lens->path != NULL) rv = b->type->lens->path(a,b,c);              \
+    else if (c->type->lens != NULL && c->type->lens->path != NULL) rv = c->type->lens->path(a,b,c);\
+    else PANIC(#name "(" #path ") Not implemented!");                     \
+    Py_DECREF(c); Py_DECREF(b); Py_DECREF(a);                                           \
+    return rv;                                                            \
+}
 
-#define BIN_OP_FUNC(name, path) BINARY_FUNC(PyObject*, name, path)
-#define BIN_OP_FUNC2(name, lens, path) BINARY_FUNC2(PyObject*, name, lens, path)
-#define BIN_TEST_FUNC(name, path) BINARY_FUNC(int, name, path)
+#define UNARY_FUNC2(ret, name, lens, path) ret name(PyObject* a) { \
+    if (a->type->lens != NULL && a->type->lens->path != NULL) return a->type->lens->path(a); \
+    PANIC(#name "(" #lens "->" #path ") Not implemented!");                                   \
+}
 
-BIN_OP_FUNC2(add_pyobject, tp_as_number, nb_add)
-BIN_OP_FUNC2(subtract_pyobject, tp_as_number, nb_subtract)
-BIN_OP_FUNC2(subscr_pyobject, tp_as_mapping, mp_subscript)
-BIN_TEST_FUNC(leq_pyobject, cmp_leq)
-BIN_TEST_FUNC(eq_pyobject, cmp_eq)
+#define BIN_OP(name, path) BINARY_FUNC(PyObject*, name, path)
+#define BIN_OP_NB(name, path) BINARY_FUNC2(PyObject*, name, tp_as_number, path)
+#define BIN_OP_MP(name, path) BINARY_FUNC2(PyObject*, name, tp_as_mapping, path)
+#define BIN_TEST(name, path) BINARY_FUNC(int, name, path)
+#define UNARY_TEST_NB(name, path) UNARY_FUNC2(int, name, tp_as_number, path)
+#define TRI_OP_NB(name, path) TRINARY_FUNC2(PyObject*, name, tp_as_number, path)
+#define UNARY_OP_NB(name, path) UNARY_FUNC2(PyObject*, name, tp_as_number, path)
+
+BIN_OP_NB(add_pyobject, nb_add)
+BIN_OP_NB(subtract_pyobject, nb_subtract)
+BIN_OP_NB(mul_pyobject, nb_multiply)
+BIN_OP_NB(rem_pyobject, nb_remainder)
+TRI_OP_NB(tri_pow_pyobject, nb_power)
+UNARY_OP_NB(neg_pyobject, nb_negative)
+UNARY_OP_NB(pos_pyobject, nb_positive)
+UNARY_OP_NB(abs_pyobject, nb_absolute)
+UNARY_TEST_NB(bool_pyobject, nb_bool)
+UNARY_OP_NB(inv_pyobject, nb_invert)
+BIN_OP_NB(lshift_pyobject, nb_lshift)
+BIN_OP_NB(rshift_pyobject, nb_rshift)
+BIN_OP_NB(and_pyobject, nb_and)
+BIN_OP_NB(xor_pyobject, nb_xor)
+BIN_OP_NB(or_pyobject, nb_or)
+UNARY_OP_NB(int_pyobject, nb_int)
+UNARY_OP_NB(float_pyobject, nb_float)
+
+BIN_OP_NB(floor_div_pyobject, nb_floor_divide)
+BIN_OP_NB(div_pyobject, nb_true_divide)
+
+BIN_OP_MP(subscr_pyobject, mp_subscript)
+BIN_TEST(leq_pyobject, cmp_lte)
+BIN_TEST(eq_pyobject, cmp_eq)
+
+PyObject* bin_pow_pyobject(PyObject* a, PyObject* b) {
+    // todo: directly implement this for each type, see if that's faster
+    PyObject* rv;
+    if (a->type->tp_as_number != NULL && a->type->tp_as_number->nb_power != NULL) rv = a->type->tp_as_number->nb_power(a,b,Py_None);
+    else if (b->type->tp_as_number != NULL && b->type->tp_as_number->nb_power != NULL) rv = b->type->tp_as_number->nb_power(a,b,Py_None);
+    else PANIC("bin_pow_pyobject Not implemented!");
+    Py_DECREF(b); Py_DECREF(a);
+    return rv;
+}
+
+PyObject* not_pyobject(PyObject* a) {
+    int is_true = PyObject_IsTrue(a);
+    Py_DECREF(a);
+    if (is_true) {
+        Py_RETURN_FALSE;
+    } else {
+        Py_RETURN_TRUE;
+    }
+}
+
+int is_pyobject(PyObject* a, PyObject* b) {
+    int eq = a == b;
+    Py_DECREF(a);
+    Py_DECREF(b);
+    return eq;
+}
 
 PyObject* fib2(PyObject* a) {
     if (leq_pyobject(a, (PyObject * ) & small_shorts[1])) {
@@ -88,6 +161,21 @@ PyObject* fib3(PyObject* a) {
     PyObject* d = add_pyobject(b, c);
 
     return d;
+}
+
+int get_type(PyObject* in) {
+    if (in->type == &PyLong_Type) return 1;
+    if (in->type == &PyTuple_Type) return 2;
+    if (in->type == &PyBool_Type) return 3;
+    if (in->type == &PyNone_Type) return 4;
+    if (in->type == &PyFloat_Type) return 5;
+//    if (in->type == PyLong_Type) return 5;
+    return -1;
+}
+
+void raise_name_error() {
+    printf("NameError: attempt to access uninitialised variable\n");
+    exit(-1);
 }
 
 
@@ -151,6 +239,16 @@ long add_long(int a, int b) {
     PyObject* result = add_pyobject(obj, obj2);
 
     return PyLong_AsLong(result);
+}
+
+double add_float(double a, double b) {
+    PyObject* obj = PyFloat_FromDouble(a);
+    PyObject* obj2 = PyFloat_FromDouble(b);
+
+    PyObject* result = add_pyobject(obj, obj2);
+
+    return PyFloat_AsDouble(result);
+
 }
 
 int main_long(int a) {

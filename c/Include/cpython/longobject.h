@@ -26,6 +26,12 @@ static inline PyObject* __PyLong_GetSmallInt_internal(int value) {
 
 PyObject* PyLong_FromLong(long ival);
 
+static inline PyObject* _PyLong_GetZero(void)
+{ return __PyLong_GetSmallInt_internal(0); }
+
+static inline PyObject* _PyLong_GetOne(void)
+{ return __PyLong_GetSmallInt_internal(1); }
+
 // custom stuff END
 
 // and now, macros
@@ -36,18 +42,25 @@ PyObject* PyLong_FromLong(long ival);
 #define IS_SMALL_INT(ival) (-NSMALLNEGINTS <= (ival) && (ival) < NSMALLPOSINTS)
 #define IS_SMALL_UINT(ival) ((ival) < NSMALLPOSINTS)
 
-//#define CHECK_BINOP(v,w)                                \
-//    do {                                                \
-//        if (!PyLong_Check(v) || !PyLong_Check(w))       \
-//            Py_RETURN_NOTIMPLEMENTED;                   \
-//    } while(0)
+
+// todo use Py_RETURN_NOTIMPLEMENTED instead of panicking
+#define CHECK_BINOP(v,w)                                \
+    do {                                                \
+        if (!PyLong_Check(v) || !PyLong_Check(w))       \
+            PANIC("not implemented");                    \
+    } while(0)
 
 // we assume that whenever this is called, we already know the type of both arguments
 // this does not hold when, for example, you try to add a long to a bool
 // todo fix this function
 // and probably split it into add_long and _add_long, when for speed reasons we can elide the check
-#define CHECK_BINOP(v,w) 0;
+//#define CHECK_BINOP(v,w) 0;
 
+// addition: intentionally exposed internal functions
+PyAPI_FUNC(int) long_leq_direct(PyLongObject* a, PyLongObject* b);
+PyAPI_FUNC(int) long_eq_direct(PyLongObject* a, PyLongObject* b);
+PyAPI_FUNC(PyObject*) long_add_direct(PyLongObject* a, PyLongObject* b);
+PyAPI_FUNC(PyObject*) long_sub_direct(PyLongObject* a, PyLongObject* b);
 
 PyAPI_DATA(PyTypeObject) PyLong_Type;
 //
@@ -61,7 +74,7 @@ PyAPI_DATA(PyTypeObject) PyLong_Type;
 //PyAPI_FUNC(PyObject *) PyLong_FromUnsignedLong(unsigned long);
 //PyAPI_FUNC(PyObject *) PyLong_FromSize_t(size_t);
 //PyAPI_FUNC(PyObject *) PyLong_FromSsize_t(Py_ssize_t);
-//PyAPI_FUNC(PyObject *) PyLong_FromDouble(double);
+PyAPI_FUNC(PyObject *) PyLong_FromDouble(double);
 PyAPI_FUNC(long) PyLong_AsLong(PyObject *);
 //PyAPI_FUNC(long) PyLong_AsLongAndOverflow(PyObject *, int *);
 PyAPI_FUNC(Py_ssize_t) PyLong_AsSsize_t(PyObject *);

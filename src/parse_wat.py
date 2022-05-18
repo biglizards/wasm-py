@@ -2,22 +2,24 @@ from __future__ import annotations
 
 import io
 import re
+import string
 import subprocess
+from ast import literal_eval
 from functools import lru_cache
 from typing import Union
-import string
-from ast import literal_eval
 
-pattern = re.compile(r'0x(\d*)\.?([pP])?([+\-])?(\d*)?')
+pattern = re.compile(r'(-?)0x(\d*)\.?([pP])?([+\-])?(\d*)?')
 
 
 def numeric_literal(token) -> Union[int, float]:
     token = ''.join(token)
 
-    if token.startswith('0x'):
+    if token.startswith('-0x'):
+        return KeywordLiteral(token)
 
+    if token.startswith('0x'):
         # in case this breaks: treat it as an opaque string instead
-        p, is_float, sign, e = pattern.match(token).groups()
+        _sign_1, p, is_float, sign, e = pattern.match(token).groups()
         if is_float:
             return int(p, 16) * (2 ** numeric_literal(f'{sign}{e}'))
         else:
@@ -26,7 +28,6 @@ def numeric_literal(token) -> Union[int, float]:
         # they both start with '0x' and then a hexnum
 
     else:
-        # note that this is not complete: it doesn't work for hex literals (but we shouldn't see any)
         return literal_eval(token)
 
 
@@ -43,7 +44,7 @@ def type_token(token: list[str]):
     c = token[0]
     if c in {'+', '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'}:
         return numeric_literal(token)
-    elif c in string.ascii_lowercase:
+    elif c in string.ascii_lowercase or c == '$':
         return keyword_literal(token)
     elif c == '"':
         assert False, 'string literals are handled elsewhere'
@@ -214,6 +215,9 @@ class Module(Node):
         for child in children:
             mapping.get(type(child), self.misc_nodes).append(child)
 
+            if isinstance(child, Func) and isinstance(child.children[0], KeywordLiteral):
+                self.funcs_by_name[child.children[0].content[0][1:]] = child
+
             if isinstance(child, Export):
                 if child.ref_type == 'func':
                     self.funcs_by_name[child.ref_name] = self.get_func_by_index(child.ref_index)
@@ -231,10 +235,16 @@ class Module(Node):
         self.children.append(func)
 
     def get_func_by_index(self, i):
+        if isinstance(i, KeywordLiteral):
+            # it's actually a $identifier
+            return self.funcs_by_name[i.content[0][1:]]
         # technically we can import globals, but I don't see this happening
         if i < len(self.imports):
             raise IndexError("Index too low")
         return self.funcs[i - len(self.imports)]
+
+    def get_global_by_name(self, name):
+        return self.globals[self.global_index_by_name[name]]
 
     @lru_cache
     def get_func_index_by_name(self, name):
@@ -253,6 +263,35 @@ class Module(Node):
         # return the number of items in the table (probably?)
         return self.table[0].children[0]
 
+    def add_global(self, name):
+        # todo should we be doing it by module offset?
+        # aka: are names globally unique?
+        glob = Global(
+            [
+                Node(name='mut i32', children=[])
+            ],
+            name='global'
+        )
+        glob.index = len(self.globals)
+        glob.func_name = name
+        self.global_index_by_name[name] = glob.index
+
+        self.globals.append(glob)
+        self.children.append(glob)
+        return glob
+
+    def set_global_value(self, name, value):
+        glob = self.get_global_by_name(name)
+        glob.children.append(
+            Node(
+                children=[
+                    value
+                ],
+                name='i32.const'
+            )
+
+        )
+
     def add_elem(self, func_id, offset):
         elem = Elem([
             Node(
@@ -267,7 +306,7 @@ class Module(Node):
         self.elems.append(elem)
         self.children.append(elem)
 
-    def add_func_to_table(self, name, func_id=None):
+    def add_func_to_table(self, name, func_id=None) -> int:
         if func_id is None:
             func_id = self.get_func_index_by_name(name)
 
@@ -278,6 +317,7 @@ class Module(Node):
             return offset
         else:
             print(f'warning: tried to add func {name} {func_id} to table twice!')
+            return self.table_indices_by_name[name]
 
     def get_table_entry_by_name(self, name):
         class LazyEntry:

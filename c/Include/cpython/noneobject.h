@@ -1,7 +1,3 @@
-//
-// Created by dave on 11/12/2021.
-//
-
 #ifndef C_NONEOBJECT_H
 #define C_NONEOBJECT_H
 
@@ -11,6 +7,7 @@ where NULL (nil) is not suitable (since NULL often means 'error').
 
 Don't forget to apply Py_INCREF() when returning this value!!!
 */
+PyAPI_DATA(PyTypeObject) PyNone_Type;
 PyAPI_DATA(PyObject) _Py_NoneStruct; /* Don't use this directly */
 #define Py_None (&_Py_NoneStruct)
 
