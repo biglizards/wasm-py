@@ -338,7 +338,6 @@ class Module(Node):
 
     def compile(self, save_name=None, opt=True) -> bytes:
         # awful hack to fix table size problems -- will be fixed soon
-        print("todo remove this")
         str(self)
         thing = str(self)
         enc = thing.encode()

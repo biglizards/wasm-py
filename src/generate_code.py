@@ -63,7 +63,6 @@ class CodeGenerator:
             self.wasm_module.add_func_to_table(builtin)
 
         self.py_module.optimise()
-        # todo do some magic here to slot stuff into the wasm module
         self.add_rotation_funcs()
 
         for name, cfg in self.py_module.cfgs.items():
@@ -154,7 +153,7 @@ class CodeGenerator:
         )
 
     def _compile_instruction(self, i, jump_table, local_count):
-        print(i)  # for debug reasons
+        # print(i)  # for debug reasons
         instr = self.compile_instruction(i, jump_table, local_count)
         return Instruction(instr, f'(; {str(i)} ;)\n')
 
@@ -406,6 +405,9 @@ class CodeGenerator:
         return self.wasm_module.get_func_index_by_name(name)
 
     def function_wrapper(self, code: CodeType, name) -> Func:
+        # NOTE: this method is deprecated in favour of python-level wrapping (see main.py)
+        # it's still available for use in chrome, but is highly suboptimal
+
         # so, we can't pass or receive PyObjects directly (ironic)
         # instead, we need to wrap them. Say we're calling a function which takes an int and returns an int
         # in that case, we need to write something like
@@ -422,7 +424,7 @@ class CodeGenerator:
         )
         call_fn = f'call {self.wasm_module.get_func_index_by_name(name)}'
 
-        is_tuple = name == 'swap'  # todo awful goddamn fucking bad shitty inference method
+        is_tuple = name == 'swap'  # todo better inference method
 
         if is_tuple:
             i = code.co_argcount
@@ -470,7 +472,7 @@ def main():
     g.add_to_module(fib.__code__, 'fib')
     wasm = g.wasm_module.compile()
     instance = run_wasm.run_wasm(wasm)
-    print(instance.exports.__fib_wrapper(5))
+    # print(instance.exports.__fib_wrapper(5))
 
     # def add(x, y):
     #     def inner_add(a, b):

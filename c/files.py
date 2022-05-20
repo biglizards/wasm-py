@@ -33,7 +33,6 @@ files = [
     "PyLong_AsLong", "PyLong_FromDouble",
     "PyTuple_New", "PyTuple_set_item_unchecked", "PyTuple_GetItem", "PyTuple_Size",
     "PyObject_IsTrue",
-    "what_the_fuck",
     "pair",
     "first",
     "second",

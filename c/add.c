@@ -249,10 +249,6 @@ long main5(int a) {
     return result;
 }
 
-void what_the_fuck() {
-    debug_print(&PyTuple_Type);
-}
-
 int flow_control_example(int a) {
     int b = a * 2;
     if (a >= 3) {
