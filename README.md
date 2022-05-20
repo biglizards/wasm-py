@@ -1,3 +1,5 @@
+To use this project, please run `init.sh`, `build.sh`, and then `run_tests.sh`.
+
 This module makes significant use of code from the CPython project. In summary:
 
  - the `int`, `float`, `bool`, `tuple` and `none` object implimentations have been extracted from CPython and modified to work with this project
