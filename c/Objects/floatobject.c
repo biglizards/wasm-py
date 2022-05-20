@@ -16,6 +16,8 @@
 #include "cpython/longintrepr.h"
 #include "cpython/longobject.h"
 #include "cpython/noneobject.h"
+#include "cpython/tupleobject.h"
+
 
 #include "cpython/pymath.h"
 
@@ -684,20 +686,27 @@ _float_div_mod(double vx, double wx, double *floordiv, double *mod)
     }
 }
 
-//static PyObject *
-//float_divmod(PyObject *v, PyObject *w)
-//{
-//    double vx, wx;
-//    double mod, floordiv;
-//    CONVERT_TO_DOUBLE(v, vx);
-//    CONVERT_TO_DOUBLE(w, wx);
-//    if (wx == 0.0) {
-//        PyErr_SetString(PyExc_ZeroDivisionError, "float divmod()");
-//        return NULL;
-//    }
-//    _float_div_mod(vx, wx, &floordiv, &mod);
+static PyObject *
+float_divmod(PyObject *v, PyObject *w)
+{
+    double vx, wx;
+    double mod, floordiv;
+    CONVERT_TO_DOUBLE(v, vx);
+    CONVERT_TO_DOUBLE(w, wx);
+    if (wx == 0.0) {
+        PyErr_SetString(PyExc_ZeroDivisionError, "float divmod()");
+        return NULL;
+    }
+    _float_div_mod(vx, wx, &floordiv, &mod);
 //    return Py_BuildValue("(dd)", floordiv, mod);
-//}
+    PyObject* z = PyTuple_New(2);
+    if (z != NULL) {
+        PyTuple_SET_ITEM(z, 0, (PyObject *) PyFloat_FromDouble(floordiv));
+        PyTuple_SET_ITEM(z, 1, (PyObject *) PyFloat_FromDouble(mod));
+    }
+    return z;
+
+}
 
 static PyObject *
 float_floor_div(PyObject *v, PyObject *w)
@@ -718,115 +727,116 @@ float_floor_div(PyObject *v, PyObject *w)
    x is not an infinity or nan. */
 #define DOUBLE_IS_ODD_INTEGER(x) (fmod(fabs(x), 2.0) == 1.0)
 
-//static PyObject *
-//float_pow(PyObject *v, PyObject *w, PyObject *z)
-//{
-//    double iv, iw, ix;
-//    int negate_result = 0;
-//
-//    if ((PyObject *)z != Py_None) {
-//        PyErr_SetString(PyExc_TypeError, "pow() 3rd argument not "
-//            "allowed unless all arguments are integers");
-//        return NULL;
-//    }
-//
-//    CONVERT_TO_DOUBLE(v, iv);
-//    CONVERT_TO_DOUBLE(w, iw);
-//
-//    /* Sort out special cases here instead of relying on pow() */
-//    if (iw == 0) {              /* v**0 is 1, even 0**0 */
-//        return PyFloat_FromDouble(1.0);
-//    }
-//    if (Py_IS_NAN(iv)) {        /* nan**w = nan, unless w == 0 */
-//        return PyFloat_FromDouble(iv);
-//    }
-//    if (Py_IS_NAN(iw)) {        /* v**nan = nan, unless v == 1; 1**nan = 1 */
-//        return PyFloat_FromDouble(iv == 1.0 ? 1.0 : iw);
-//    }
-//    if (Py_IS_INFINITY(iw)) {
-//        /* v**inf is: 0.0 if abs(v) < 1; 1.0 if abs(v) == 1; inf if
-//         *     abs(v) > 1 (including case where v infinite)
-//         *
-//         * v**-inf is: inf if abs(v) < 1; 1.0 if abs(v) == 1; 0.0 if
-//         *     abs(v) > 1 (including case where v infinite)
-//         */
-//        iv = fabs(iv);
-//        if (iv == 1.0)
-//            return PyFloat_FromDouble(1.0);
-//        else if ((iw > 0.0) == (iv > 1.0))
-//            return PyFloat_FromDouble(fabs(iw)); /* return inf */
-//        else
-//            return PyFloat_FromDouble(0.0);
-//    }
-//    if (Py_IS_INFINITY(iv)) {
-//        /* (+-inf)**w is: inf for w positive, 0 for w negative; in
-//         *     both cases, we need to add the appropriate sign if w is
-//         *     an odd integer.
-//         */
-//        int iw_is_odd = DOUBLE_IS_ODD_INTEGER(iw);
-//        if (iw > 0.0)
-//            return PyFloat_FromDouble(iw_is_odd ? iv : fabs(iv));
-//        else
-//            return PyFloat_FromDouble(iw_is_odd ?
-//                                      copysign(0.0, iv) : 0.0);
-//    }
-//    if (iv == 0.0) {  /* 0**w is: 0 for w positive, 1 for w zero
-//                         (already dealt with above), and an error
-//                         if w is negative. */
-//        int iw_is_odd = DOUBLE_IS_ODD_INTEGER(iw);
-//        if (iw < 0.0) {
-//            PyErr_SetString(PyExc_ZeroDivisionError,
-//                            "0.0 cannot be raised to a "
-//                            "negative power");
-//            return NULL;
-//        }
-//        /* use correct sign if iw is odd */
-//        return PyFloat_FromDouble(iw_is_odd ? iv : 0.0);
-//    }
-//
-//    if (iv < 0.0) {
-//        /* Whether this is an error is a mess, and bumps into libm
-//         * bugs so we have to figure it out ourselves.
-//         */
-//        if (iw != floor(iw)) {
-//            /* Negative numbers raised to fractional powers
-//             * become complex.
-//             */
+static PyObject *
+float_pow(PyObject *v, PyObject *w, PyObject *z)
+{
+    double iv, iw, ix;
+    int negate_result = 0;
+
+    if ((PyObject *)z != Py_None) {
+        PyErr_SetString(PyExc_TypeError, "pow() 3rd argument not "
+            "allowed unless all arguments are integers");
+        return NULL;
+    }
+
+    CONVERT_TO_DOUBLE(v, iv);
+    CONVERT_TO_DOUBLE(w, iw);
+
+    /* Sort out special cases here instead of relying on pow() */
+    if (iw == 0) {              /* v**0 is 1, even 0**0 */
+        return PyFloat_FromDouble(1.0);
+    }
+    if (Py_IS_NAN(iv)) {        /* nan**w = nan, unless w == 0 */
+        return PyFloat_FromDouble(iv);
+    }
+    if (Py_IS_NAN(iw)) {        /* v**nan = nan, unless v == 1; 1**nan = 1 */
+        return PyFloat_FromDouble(iv == 1.0 ? 1.0 : iw);
+    }
+    if (Py_IS_INFINITY(iw)) {
+        /* v**inf is: 0.0 if abs(v) < 1; 1.0 if abs(v) == 1; inf if
+         *     abs(v) > 1 (including case where v infinite)
+         *
+         * v**-inf is: inf if abs(v) < 1; 1.0 if abs(v) == 1; 0.0 if
+         *     abs(v) > 1 (including case where v infinite)
+         */
+        iv = fabs(iv);
+        if (iv == 1.0)
+            return PyFloat_FromDouble(1.0);
+        else if ((iw > 0.0) == (iv > 1.0))
+            return PyFloat_FromDouble(fabs(iw)); /* return inf */
+        else
+            return PyFloat_FromDouble(0.0);
+    }
+    if (Py_IS_INFINITY(iv)) {
+        /* (+-inf)**w is: inf for w positive, 0 for w negative; in
+         *     both cases, we need to add the appropriate sign if w is
+         *     an odd integer.
+         */
+        int iw_is_odd = DOUBLE_IS_ODD_INTEGER(iw);
+        if (iw > 0.0)
+            return PyFloat_FromDouble(iw_is_odd ? iv : fabs(iv));
+        else
+            return PyFloat_FromDouble(iw_is_odd ?
+                                      copysign(0.0, iv) : 0.0);
+    }
+    if (iv == 0.0) {  /* 0**w is: 0 for w positive, 1 for w zero
+                         (already dealt with above), and an error
+                         if w is negative. */
+        int iw_is_odd = DOUBLE_IS_ODD_INTEGER(iw);
+        if (iw < 0.0) {
+            PyErr_SetString(PyExc_ZeroDivisionError,
+                            "0.0 cannot be raised to a "
+                            "negative power");
+            return NULL;
+        }
+        /* use correct sign if iw is odd */
+        return PyFloat_FromDouble(iw_is_odd ? iv : 0.0);
+    }
+
+    if (iv < 0.0) {
+        /* Whether this is an error is a mess, and bumps into libm
+         * bugs so we have to figure it out ourselves.
+         */
+        if (iw != floor(iw)) {
+            /* Negative numbers raised to fractional powers
+             * become complex.
+             */
+            PANIC("Negative numbers raised to fractional powers become complex!");
 //            return PyComplex_Type.tp_as_number->nb_power(v, w, z);
-//        }
-//        /* iw is an exact integer, albeit perhaps a very large
-//         * one.  Replace iv by its absolute value and remember
-//         * to negate the pow result if iw is odd.
-//         */
-//        iv = -iv;
-//        negate_result = DOUBLE_IS_ODD_INTEGER(iw);
-//    }
-//
-//    if (iv == 1.0) { /* 1**w is 1, even 1**inf and 1**nan */
-//        /* (-1) ** large_integer also ends up here.  Here's an
-//         * extract from the comments for the previous
-//         * implementation explaining why this special case is
-//         * necessary:
-//         *
-//         * -1 raised to an exact integer should never be exceptional.
-//         * Alas, some libms (chiefly glibc as of early 2003) return
-//         * NaN and set EDOM on pow(-1, large_int) if the int doesn't
-//         * happen to be representable in a *C* integer.  That's a
-//         * bug.
-//         */
-//        return PyFloat_FromDouble(negate_result ? -1.0 : 1.0);
-//    }
-//
-//    /* Now iv and iw are finite, iw is nonzero, and iv is
-//     * positive and not equal to 1.0.  We finally allow
-//     * the platform pow to step in and do the rest.
-//     */
+        }
+        /* iw is an exact integer, albeit perhaps a very large
+         * one.  Replace iv by its absolute value and remember
+         * to negate the pow result if iw is odd.
+         */
+        iv = -iv;
+        negate_result = DOUBLE_IS_ODD_INTEGER(iw);
+    }
+
+    if (iv == 1.0) { /* 1**w is 1, even 1**inf and 1**nan */
+        /* (-1) ** large_integer also ends up here.  Here's an
+         * extract from the comments for the previous
+         * implementation explaining why this special case is
+         * necessary:
+         *
+         * -1 raised to an exact integer should never be exceptional.
+         * Alas, some libms (chiefly glibc as of early 2003) return
+         * NaN and set EDOM on pow(-1, large_int) if the int doesn't
+         * happen to be representable in a *C* integer.  That's a
+         * bug.
+         */
+        return PyFloat_FromDouble(negate_result ? -1.0 : 1.0);
+    }
+
+    /* Now iv and iw are finite, iw is nonzero, and iv is
+     * positive and not equal to 1.0.  We finally allow
+     * the platform pow to step in and do the rest.
+     */
 //    errno = 0;
-//    ix = pow(iv, iw);
+    ix = pow(iv, iw);
 //    Py_ADJUST_ERANGE1(ix);
-//    if (negate_result)
-//        ix = -ix;
-//
+    if (negate_result)
+        ix = -ix;
+
 //    if (errno != 0) {
 //        /* We don't expect any errno value other than ERANGE, but
 //         * the range of libm bugs appears unbounded.
@@ -835,8 +845,8 @@ float_floor_div(PyObject *v, PyObject *w)
 //                             PyExc_ValueError);
 //        return NULL;
 //    }
-//    return PyFloat_FromDouble(ix);
-//}
+    return PyFloat_FromDouble(ix);
+}
 
 #undef DOUBLE_IS_ODD_INTEGER
 
@@ -892,12 +902,12 @@ float.__trunc__
 Return the Integral closest to x between 0 and x.
 [clinic start generated code]*/
 
-//static PyObject *
-//float___trunc___impl(PyObject *self)
-///*[clinic end generated code: output=dd3e289dd4c6b538 input=591b9ba0d650fdff]*/
-//{
-//    return PyLong_FromDouble(PyFloat_AS_DOUBLE(self));
-//}
+static PyObject *
+float___trunc___impl(PyObject *self)
+/*[clinic end generated code: output=dd3e289dd4c6b538 input=591b9ba0d650fdff]*/
+{
+    return PyLong_FromDouble(PyFloat_AS_DOUBLE(self));
+}
 
 /*[clinic input]
 float.__floor__
@@ -1982,6 +1992,7 @@ Formats the float according to format_spec.
 //    .tp_vectorcall = (vectorcallfunc)float_vectorcall,
 //};
 
+// float comparison is weirdly complex, and honestly I don't feel up to it right now
 //#define CMP_FLOAT(name, symbol) CMP_OP(name, symbol, float)
 //
 //CMP_FLOAT(lt, <)
@@ -1997,19 +2008,19 @@ static PyNumberMethods float_as_number = {
         float_sub,                   /*nb_subtract*/
         float_mul,                   /*nb_multiply*/
         float_rem,                   /*nb_remainder*/
-        0,                           /*nb_divmod*/
-        0,                           /*nb_power*/
-        0,                           /*nb_negative*/
-        0,                           /*tp_positive*/
-        0,                           /*tp_absolute*/
-        0,                           /*tp_bool*/
+        float_divmod,                /*nb_divmod*/
+        float_pow,                   /*nb_power*/
+        (unaryfunc)float_neg,        /*nb_negative*/
+        float_float,                 /*tp_positive*/
+        (unaryfunc)float_abs,        /*tp_absolute*/
+        (inquiry)float_bool,         /*tp_bool*/
         0,                           /*nb_invert*/
         0,                           /*nb_lshift*/
         0,                           /*nb_rshift*/
         0,                           /*nb_and*/
         0,                           /*nb_xor*/
         0,                           /*nb_or*/
-        0,                           /*nb_int*/
+        float___trunc___impl,        /*nb_int*/
         float_float,                 /*nb_float*/
         0,                           /* nb_inplace_add */
         0,                           /* nb_inplace_subtract */

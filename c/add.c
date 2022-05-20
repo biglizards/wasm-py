@@ -19,6 +19,7 @@
 
 //extern int addwat(int, int);
 
+int get_type(PyObject* in);
 
 #define LONG(x)
 
@@ -50,7 +51,7 @@
     ret rv;                                                                      \
     if (a->type->lens != NULL && a->type->lens->path != NULL) rv = a->type->lens->path(a,b);                   \
     else if (b->type->lens != NULL && b->type->lens->path != NULL) rv = b->type->lens->path(a,b);               \
-    else PANIC(#name "(" #path ") Not implemented!");                     \
+    else {printf("it's a %d!\n", get_type(a)); PANIC(#name "(" #path ") Not implemented!");}                     \
     Py_DECREF(b); Py_DECREF(a);                                           \
     return rv;                                                            \
 }
@@ -60,7 +61,7 @@
     if (a->type->lens != NULL && a->type->lens->path != NULL) rv = a->type->lens->path(a,b,c);                   \
     else if (b->type->lens != NULL && b->type->lens->path != NULL) rv = b->type->lens->path(a,b,c);              \
     else if (c->type->lens != NULL && c->type->lens->path != NULL) rv = c->type->lens->path(a,b,c);\
-    else PANIC(#name "(" #path ") Not implemented!");                     \
+    else PANIC(#name "(" #path ") Not implemented!");                                            \
     Py_DECREF(c); Py_DECREF(b); Py_DECREF(a);                                           \
     return rv;                                                            \
 }
@@ -100,8 +101,12 @@ BIN_OP_NB(floor_div_pyobject, nb_floor_divide)
 BIN_OP_NB(div_pyobject, nb_true_divide)
 
 BIN_OP_MP(subscr_pyobject, mp_subscript)
-BIN_TEST(leq_pyobject, cmp_lte)
+BIN_TEST(lt_pyobject, cmp_lt)
+BIN_TEST(lte_pyobject, cmp_lte)
 BIN_TEST(eq_pyobject, cmp_eq)
+BIN_TEST(neq_pyobject, cmp_neq)
+BIN_TEST(gt_pyobject, cmp_gt)
+BIN_TEST(gte_pyobject, cmp_gte)
 
 PyObject* bin_pow_pyobject(PyObject* a, PyObject* b) {
     // todo: directly implement this for each type, see if that's faster
@@ -130,8 +135,34 @@ int is_pyobject(PyObject* a, PyObject* b) {
     return eq;
 }
 
+// builtins:
+// abs: abs_pyobject
+// float: float_pyobject
+// int: int_pyobject
+// pow is either bin or trin pow_pyobject depending on no of arguments
+
+PyObject* builtin_min(PyObject* a, PyObject* b) {
+    if (lt_pyobject(a, b)) {
+        Py_DECREF(b);
+        return a;
+    }
+    Py_DECREF(a);
+    return b;
+}
+
+PyObject* builtin_max(PyObject* a, PyObject* b) {
+    // in edge cases, custom types can return weird nonsense for lt vs gt
+    // obviously we don't have custom types, so it doesn't matter for now
+    if (lt_pyobject(a, b)) {
+        Py_DECREF(a);
+        return b;
+    }
+    Py_DECREF(b);
+    return a;
+}
+
 PyObject* fib2(PyObject* a) {
-    if (leq_pyobject(a, (PyObject * ) & small_shorts[1])) {
+    if (lte_pyobject(a, (PyObject * ) & small_shorts[1])) {
         small_shorts[1].Base.refCount++;
         Py_DECREF(a);
         return (PyObject * ) & small_shorts[1];
@@ -147,7 +178,7 @@ PyObject* fib2(PyObject* a) {
 }
 
 PyObject* fib3(PyObject* a) {
-    int bool = leq_pyobject(a, (PyObject * ) & SMALL_INT(1));
+    int bool = lte_pyobject(a, (PyObject * ) & SMALL_INT(1));
     if (bool) {
 //        SMALL_INT(1).ob_base.ob_base.refCount++;
 //        py_decref(a);

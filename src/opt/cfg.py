@@ -261,7 +261,7 @@ class ControlFlowGraph:
 
             return most_general_scope
 
-        # finally we can apply the stackify algorithm to generate a scope tree
+        # finally we can generate a scope tree
         # to do this, we iterate over the forward edges in the tree
         # if they're consecutive, continue
         # otherwise, place a new `block` scope S such that

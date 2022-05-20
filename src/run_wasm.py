@@ -2,7 +2,7 @@ import sys
 
 from wasmer import engine, Store, Module, Instance, Memory, ImportObject, Function, FunctionType, Type
 from wasmer_compiler_cranelift import Compiler
-from wasmer_compiler_singlepass import Compiler as C2
+# from wasmer_compiler_singlepass import Compiler as C2
 
 # from generate_code import CodeGenerator
 

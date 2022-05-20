@@ -1,4 +1,5 @@
 from functools import lru_cache
+from itertools import chain
 from types import FunctionType, CodeType
 
 import opt.py_module, opt.main
@@ -34,18 +35,32 @@ def func(
 
 
 class CodeGenerator:
-    def __init__(self, path='/home/dave/PycharmProjects/wasm-py/build/emcc/add2.wasm'):
+    def __init__(self, path='c/build/emcc/add2.wasm'):
         self.path = path
         self.wasm_module = parse_wat.load(path)
         self.py_module = opt.py_module.PythonModule()
+        self.builtin_names = {
+            'abs': 'abs_pyobject',
+            'float': 'float_pyobject',
+            'int': 'int_pyobject',
+            'bool': 'PyObject_IsTrue',
+            'min': 'builtin_min',
+            'max': 'builtin_max',
+            # pow has an optional argument and we dont have a nice way of handling that right now
+            'pow': 'bin_pow_pyobject',
+            'pow_mod': 'tri_pow_pyobject',
+        }
 
     def compile(self, save_name=None, optimise=True):
         self.py_module.analyse()
         # generate a wasm global for each global
-        for global_name in self.py_module.all_globals:
+        for global_name in chain(self.py_module.all_globals, self.builtin_names):
             glob = self.wasm_module.add_global(global_name)
             glob.mutated = global_name in self.py_module.mutated_globals
-            # todo: populate global? Or can we only do that once the function is defined?
+
+        # also add builtins to the table, because yes
+        for builtin in self.builtin_names.values():
+            self.wasm_module.add_func_to_table(builtin)
 
         self.py_module.optimise()
         # todo do some magic here to slot stuff into the wasm module
@@ -57,10 +72,13 @@ class CodeGenerator:
             self.wasm_module.add_func_to_table(name)  # make the func globally accessible
             self.wasm_module.add_func(self.function_wrapper(cfg.func.__code__, name), f'__{name}_wrapper')
 
-        for glob in map(self.wasm_module.get_global_by_name, self.py_module.all_globals):
+        for glob in map(self.wasm_module.get_global_by_name, chain(self.py_module.all_globals, self.builtin_names)):
             if glob.func_name in self.wasm_module.funcs_by_name:
                 # populate the global with the table index of the function
                 value = self.wasm_module.get_table_entry_by_name(glob.func_name)
+            elif glob.func_name in self.builtin_names:
+                # populate the global with our builtin
+                value = self.wasm_module.get_table_entry_by_name(self.builtin_names[glob.func_name])
             else:
                 # populate it with None to begin with (we need to populate it with something, right?)
                 # todo replace with sentry value
@@ -150,16 +168,25 @@ class CodeGenerator:
             return Instruction(i)
 
         if i.opname == 'LOAD_CONST':
-            if isinstance(i.argval, int):
-                return Instruction(f'i32.const {i.argval} '
-                                   f'call {self.wasm_module.get_func_index_by_name("PyLong_FromLong")}')
-            elif isinstance(i.argval, float):
-                return Instruction(f'f64.const {i.argval} '
-                                   f'call {self.wasm_module.get_func_index_by_name("PyFloat_FromDouble")}')
-            elif i.argval is None:
-                return Instruction(f'call {self.wasm_module.get_func_index_by_name("return_none")}')
-            else:
-                raise NotImplementedError(f'consts of type {type(i.argval)} have not been implemented!')
+            # this could be made much faster by having the consts be static
+            def load_const(value):
+                if isinstance(value, int):
+                    return Instruction(f'i32.const {value} '
+                                       f'call {self.wasm_module.get_func_index_by_name("PyLong_FromLong")}')
+                elif isinstance(value, float):
+                    return Instruction(f'f64.const {value} '
+                                       f'call {self.wasm_module.get_func_index_by_name("PyFloat_FromDouble")}')
+                elif isinstance(value, tuple):
+                    return Instruction(
+                        *[load_const(item) for item in value],
+                        *[f'(call {self.wasm_module.get_func_index_by_name("PyTuple_set_item_unchecked")} (i32.const {j}))'
+                          for j in range(len(tuple)-1, -1, -1)]
+                    )
+                elif value is None:
+                    return Instruction(f'call {self.wasm_module.get_func_index_by_name("return_none")}')
+                else:
+                    raise NotImplementedError(f'consts of type {type(value)} have not been implemented!')
+            return load_const(i.argval)
         elif i.opname == 'RETURN_VALUE':
             # sometimes, returns are implicit. in those cases, the instruction should be optimised out
             # also: when the function ends, call py_decref on each local, once
@@ -181,15 +208,27 @@ class CodeGenerator:
             return Instruction('global.get', self.wasm_module.global_index_by_name[i.argval])
         elif i.opname == 'STORE_GLOBAL':
             return Instruction('global.set', self.wasm_module.global_index_by_name[i.argval])
-
-        # elif i.opname == 'LOAD_DEREF':
-        #     pass
+        elif i.opname == 'DELETE_GLOBAL':
+            # if it's shadowing a builtin, restore the builtin. Otherwise, set it to the sentry value (None).
+            # todo: decref? so far globals are immune to reference counting altogether
+            return Instruction(
+                (f'i32.const {self.wasm_module.get_table_entry_by_name(self.builtin_names[i.argval])} '
+                 if i.argval in self.builtin_names
+                 else f'call {self.wasm_module.get_func_index_by_name("return_none")} '),
+                'global.set', self.wasm_module.global_index_by_name[i.argval]
+            )
+            pass
         elif i.opname == 'STORE_FAST':
             # in theory, this approach may become invalid in the future, if gc calls __del__ methods
             return Instruction(f'local.get {i.arg} '
                                f'call {self.wasm_module.get_func_index_by_name("py_decref")} '
                                f'local.set {i.arg}')
             # return Instruction(f'local.set {i.arg}')
+        elif i.opname == 'DELETE_FAST':
+            return Instruction(f'local.get {i.arg} '
+                               f'call {self.wasm_module.get_func_index_by_name("py_decref")} '
+                               f'call {self.wasm_module.get_func_index_by_name("return_none")} '
+                               f'local.set {i.arg}')
         # currently no types support inplace operations (or, at least, treat them differently)
         # in the future, this will have to change, but it's good for now
         elif i.opname in ['BINARY_ADD', 'INPLACE_ADD']:
@@ -202,6 +241,8 @@ class CodeGenerator:
             return Instruction(f'call {self.wasm_module.get_func_index_by_name("subtract_pyobject")}')
 
         # todo: static typing optimisations on these number functions too
+        elif i.opname in ['BINARY_MULTIPLY', 'INPLACE_MULTIPLY']:
+            return Instruction(f'call {self.wasm_module.get_func_index_by_name("mul_pyobject")}')
         elif i.opname in ['BINARY_MODULO', 'INPLACE_MODULO']:
             return Instruction(f'call {self.wasm_module.get_func_index_by_name("rem_pyobject")}')
         elif i.opname in ['BINARY_TRUE_DIVIDE', 'INPLACE_TRUE_DIVIDE']:
@@ -240,7 +281,7 @@ class CodeGenerator:
             op_name = op_map[i.argval]
             if i.use_static_typing and i.static_type is opt.main.Int:
                 return Instruction(f'call {self.wasm_module.get_func_index_by_name(f"long_{op_name}_direct")}')
-            return Instruction(f'call {self.wasm_module.get_func_index_by_name(f"long_{op_name}")}')
+            return Instruction(f'call {self.wasm_module.get_func_index_by_name(f"{op_name}_pyobject")}')
         elif i.opname == 'BINARY_SUBSCR':
             return Instruction(f'call {self.wasm_module.get_func_index_by_name("subscr_pyobject")}')
         elif i.opname.startswith('POP_JUMP_IF'):
@@ -276,7 +317,11 @@ class CodeGenerator:
 
                     # optimisation: sometimes we can call the function directly
                     if i.use_direct_function_call:
-                        return Instruction(f'call {self.wasm_module.get_func_index_by_name(i.base_func_name)}')
+                        try:
+                            return Instruction(f'call {self.wasm_module.get_func_index_by_name(i.base_func_name)}')
+                        except KeyError:  # this happens when it's a builtin
+                            index = self.wasm_module.get_func_index_by_name(self.builtin_names[i.base_func_name])
+                            return Instruction(f'call {index}')
                     # secondary, less common case: similar analysis, but it's a local (ie an argument)
                     # (we don't do that right now. but could)
 

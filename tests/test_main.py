@@ -2,7 +2,7 @@ import dis
 
 from generate_code import CodeGenerator
 # from src.main_old import func_to_wasm, run_func, Module
-from main import compile_func_to_wasm, compile_and_save, compile_multiple
+from main import compile_func_to_wasm, compile_and_save, compile_multiple, compile_module
 
 
 def test_lambda_add():
@@ -15,14 +15,15 @@ def test_lambda_add():
 
 
 def test_func_add():
+    @compile_func_to_wasm
     def add(x, y):
         return x+y
 
-    func = compile_func_to_wasm(add)
-    assert func(3, 33) == 36
+    assert add(3, 33) == 36
 
 
 def test_pair_swap():
+    @compile_func_to_wasm
     def swap(x, y):
         # tests out making and deconstructing tuples
         z = (x, y)
@@ -30,22 +31,45 @@ def test_pair_swap():
         b = z[1]
         return b, a
 
-    ans = compile_func_to_wasm(swap)(33, 3)
-    assert ans == (3, 33)
+    assert swap(33, 3) == (3, 33)
 
 
 def test_undefined_operation():
+    # make sure undefined operations correctly crash instead of some kind of undefined behaviour
+    @compile_func_to_wasm
     def add_tuples(x):
-        a = (x,)  # it uses a variable so we can avoid tuple constants
+        a = (x,)
         b = (x,)
         return a + b  # actually, this should work (producing (x, x)) -- it just hasn't been implemented yet
 
-    func = compile_func_to_wasm(add_tuples)
     try:
-        func(3)
+        add_tuples(3)
         assert False
     except RuntimeError:
         pass
+
+
+def test_numerical_ops():
+    import example_files.numerical_ops
+    module = compile_module(example_files.numerical_ops)
+
+    assert module.add(5, 3) == 8
+    assert module.add(5.2, 3.4) == 5.2 + 3.4
+    assert module.subtract(5, 3) == 2
+    assert module.subtract(5.2, 3.4) == 5.2 - 3.4
+    assert module.mult(5, 3) == 15
+    assert module.mult(5.2, 3.4) == 5.2 * 3.4
+    assert module.pow_test(5, 3) == 125
+    assert module.pow_test(5.5, 3.2) == 5.5**3.2
+    assert module.pow_mod_test(253, 2342, 124) == 25
+    assert module.sign_operations(2) == 1
+    assert module.divmod(27, 5) == (5.4, 2)
+    assert module.divmod(27.1, 5.4) == (27.1 / 5.4, 27.1 % 5.4)
+    assert module.bool_test(5) == 1
+    assert module.bool_test(0) == -1
+    assert module.bool_test(0.0) == -1
+    assert module.bool_test(tuple()) == -1  # technically this isn't a numerical op but w/e
+    assert module.bitwise_ops(245, 3) == (245 >> 3, 245 << 3, 245 | 3, 245 & 3)
 
 
 def test_simple_flow():
@@ -83,19 +107,19 @@ def test_while_loop():
     assert efficient_fib(10) == 55
     assert efficient_fib(35) == 9227465
 
-
-def test_nested_function():
-    @compile_func_to_wasm
-    def add(x, y):
-        def inner_add(a, b):
-            return a+b
-        return inner_add(x, y)
-
-    assert add(3, 33) == 36
+# we don't have these yet
+# def test_nested_function():
+#     @compile_func_to_wasm
+#     def add(x, y):
+#         def inner_add(a, b):
+#             return a+b
+#         return inner_add(x, y)
+#
+#     assert add(3, 33) == 36
 
 
 def test_two_functions():
-    from example_files.example import add_one, add
+    from example_files.function_calls import add_one, add
 
     add_one, add = compile_multiple(add_one, add)
 
@@ -142,7 +166,7 @@ def test_global_mutation():
     except RuntimeError:
         pass
 
-    print(set_counter())
+    set_counter()
     assert counter() == 1
     assert counter() == 2
     assert counter() == 3
@@ -182,6 +206,112 @@ def test_global_scope():
         pass
 
 
+def test_builtins():
+    import example_files.built_in_functions
+    module = compile_module(example_files.built_in_functions)
+
+    assert module.call_int(1.1) == 1
+    assert module.call_float(1) == 1.0
+    assert module.call_abs(-5) == 5
+    assert module.call_abs(-5.5) == 5.5
+    assert module.call_min(2, 4) == 2
+    assert module.call_min(4, 2) == 2
+    assert module.call_max(2, 4) == 4
+    assert module.call_max(4, 2) == 4
+
+
+def test_builtin_shadowing():
+    from example_files.builtin_shadowing import min_and_max, return_first, return_second, set_first, set_second, \
+        del_first, del_second
+
+    min_and_max, _, _, set_first, set_second, del_first, del_second = compile_multiple(
+        min_and_max, return_first, return_second, set_first, set_second, del_first, del_second
+    )
+
+    assert min_and_max(10, 20) == 10
+    assert min_and_max(5, 5) == 5
+    assert min_and_max(10, 7) == 7
+    assert min_and_max(3, 8) == 3
+
+    set_first()
+
+    assert min_and_max(10, 20) == 10
+    assert min_and_max(5, 5) == 5
+    assert min_and_max(10, 7) == -1
+    assert min_and_max(3, 8) == 3
+
+    set_second()
+
+    # now it always returns the first value
+    assert min_and_max(10, 20) == 10
+    assert min_and_max(20, 10) == 20
+    assert min_and_max(5, 5) == 5
+    assert min_and_max(10, 7) == 10
+    assert min_and_max(3, 8) == 3
+
+    del_first()
+
+    # now it returns the first value iff it's smaller
+    assert min_and_max(10, 20) == 10
+    assert min_and_max(20, 10) == -1
+    assert min_and_max(5, 5) == 5
+    assert min_and_max(10, 7) == -1
+    assert min_and_max(3, 8) == 3
+
+    del_second()
+
+    # both builtins are unshadowed now, good
+    assert min_and_max(10, 20) == 10
+    assert min_and_max(20, 10) == 10
+    assert min_and_max(5, 5) == 5
+    assert min_and_max(10, 7) == 7
+    assert min_and_max(3, 8) == 3
+
+
+def test_weird_code():
+    # try to cause some kind of memory corruption (via double free, or just leaking).
+    # this stress test takes several minutes.
+    # so far, it always fails to mess anything up, which is a good sign.
+    from example_files.cause_memory_corruption import foo, decref_functions, fib_python, sum_of_primes, \
+        brute_force_is_prime, use_undefined_global, really_use_it
+    decref_functions, foo, fib, sum_of_primes_, _,  use_undefined_global, really_use_it = compile_multiple(
+        decref_functions, foo, fib_python, sum_of_primes, brute_force_is_prime, use_undefined_global, really_use_it
+    )
+
+    try:
+        if use_undefined_global() is None:
+            print('warning: undefined things are _still_ None, this should raise an exception by now')
+        else:
+            assert False
+    except RuntimeError:
+        pass
+
+    try:
+        really_use_it()
+        assert False
+    except RuntimeError:
+        pass
+
+    # we can cause a memory leak by crashing the program repeatedly, but really recovering from a crash is already
+    # undefined behaviour, so it's not a huge concern.
+
+    assert foo(5) == 6
+
+    for _ in range(1000):
+        decref_functions()
+        assert foo(5) == 6
+
+    assert fib(38) == 39088169
+    assert sum_of_primes_(20000) == sum_of_primes(20000)
+
+    for _ in range(1000):
+        decref_functions()
+        assert foo(5) == 6
+
+    assert fib(38) == 39088169
+    assert sum_of_primes_(20000) == sum_of_primes(20000)
+
+
 def bench(f, arg, n=10000):
     import time
     t1 = time.time()
@@ -201,10 +331,15 @@ if __name__ == '__main__':
     # test_pair_swap()
     # test_undefined_operation()  # we expect this one to output some error messages
     # test_simple_flow()
-    test_while_loop()
+    # test_while_loop()
     # test_two_functions()
     # test_fib()
     # test_ambiguous_function_pointer()
     # test_division()
+    test_builtins()
+    # test_builtin_shadowing()
+    # test_weird_code()
+    # test_numerical_ops()
+
 
 import opcode

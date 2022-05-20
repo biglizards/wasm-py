@@ -22,6 +22,11 @@ PyTupleObject* PyTuple_set_item_unchecked(PyObject* v, PyTupleObject* op, Py_ssi
     return op;
 }
 
+PyTupleObject* PyTuple_set_item_unchecked2(PyObject* v, PyTupleObject* op, Py_ssize_t i) {
+    PyTuple_SET_ITEM(op, i, v);
+    return op;
+}
+
 
 //
 ///*[clinic input]

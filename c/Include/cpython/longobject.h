@@ -47,7 +47,7 @@ static inline PyObject* _PyLong_GetOne(void)
 #define CHECK_BINOP(v,w)                                \
     do {                                                \
         if (!PyLong_Check(v) || !PyLong_Check(w))       \
-            PANIC("not implemented");                    \
+            PANIC("PyLong CHECK_BINOP got non-long argument!");                    \
     } while(0)
 
 // we assume that whenever this is called, we already know the type of both arguments

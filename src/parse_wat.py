@@ -266,14 +266,19 @@ class Module(Node):
     def add_global(self, name):
         # todo should we be doing it by module offset?
         # aka: are names globally unique?
+
+        # if a global shadows a builtin, we call this function twice. Don't.
+        if name in self.global_index_by_name:
+            return self.get_global_by_name(name)
+
         glob = Global(
             [
                 Node(name='mut i32', children=[])
             ],
-            name='global'
+            name='global',
+            index=len(self.globals),
+            func_name=name,
         )
-        glob.index = len(self.globals)
-        glob.func_name = name
         self.global_index_by_name[name] = glob.index
 
         self.globals.append(glob)
@@ -282,6 +287,11 @@ class Module(Node):
 
     def set_global_value(self, name, value):
         glob = self.get_global_by_name(name)
+        # we _set_, we don't just append
+        if len(glob.children) != 1:
+            # if glob.children[1].children != value:
+            #     print(f"warning: overwriting global {name} with value {value} (was {glob.children[1].children})")
+            glob.children = [glob.children[0]]
         glob.children.append(
             Node(
                 children=[
@@ -385,6 +395,12 @@ class Func(Node):
 
 class Global(Node):
     name = 'global'
+
+    def __init__(self, children, name, index=None, func_name=None):
+        super().__init__(children, name)
+        # todo parse and fill these in
+        self.index = index
+        self.func_name = func_name
 
 
 class Table(Node):

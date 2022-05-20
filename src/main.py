@@ -1,3 +1,5 @@
+from inspect import getmembers, isfunction
+
 from generate_code import CodeGenerator
 from run_wasm import run_wasm
 
@@ -41,16 +43,45 @@ def wrapper_wrapper(func_name, instance):
     def extract_error(value):
         raise RuntimeError('failed to extract value! Unknown type!')
 
-    type_map = {1: extract_int, 2: extract_tuple, 3: extract_bool, 4: extract_none, 5: extract_float,
+    extract_map = {1: extract_int, 2: extract_tuple, 3: extract_bool, 4: extract_none, 5: extract_float,
                 -1: extract_error}
 
     def extract(value):
-        return type_map[call('get_type', value)](value)
+        return extract_map[call('get_type', value)](value)
+
+    def push_int(value):
+        return call('PyLong_FromLong', value)
+
+    def push_tuple(value):
+        args = [push_arg(item) for item in value]
+        tp = call('PyTuple_New', len(value))
+        for i, arg in enumerate(args):
+            tp = call('PyTuple_set_item_unchecked', arg, tp, i)
+        return tp
+
+    def push_bool(value):
+        # is it weird to go via long? kinda yes
+        return call('bool_pyobject', push_int(value))
+
+    def push_none(value):
+        return call('return_none')
+
+    def push_float(value):
+        return call('PyFloat_FromDouble', value)
+
+    push_map = {int: push_int, tuple: push_tuple, bool: push_bool, type(None): push_none, float: push_float,
+                -1: extract_error}
+
+    def push_arg(arg):
+        return push_map[type(arg)](arg)
 
     def inner(*args):
         # todo: maybe fix that we don't wrap nicely too
-        func = getattr(instance.exports, f'__{func_name}_wrapper')
-        return extract(func(*args))
+        args = [push_arg(arg) for arg in args]
+        rv = call(func_name, *args)
+        return extract(rv)
+
+    inner.__name__ = func_name
 
     return inner
 
@@ -88,6 +119,19 @@ def compile_multiple(*funcs):
         wrapper_wrapper(func.__name__, instance)
         for func in funcs
     ]
+
+
+class Dotdict(dict):
+    __getattr__ = dict.__getitem__
+    __setattr__ = dict.__setitem__
+    __delattr__ = dict.__delitem__
+
+
+def compile_module(mod):
+    return Dotdict({
+        func.__name__: func for func in
+        compile_multiple(*[f for _, f in getmembers(mod, isfunction)])
+    })
 
 
 def main():

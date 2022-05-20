@@ -14,7 +14,8 @@ files = [
     # 2. sequence functions
     "subscr_pyobject",
     # 3. comparison functions
-    "leq_pyobject", "eq_pyobject", "is_pyobject",
+    "lt_pyobject", "lte_pyobject", "eq_pyobject", "neq_pyobject", "gt_pyobject", "gte_pyobject",
+    "is_pyobject",
 
     # ref_counting
     "py_incref", "py_decref",
@@ -51,6 +52,9 @@ files = [
     # float stuff
     "PyFloat_FromDouble", "PyFloat_AsDouble",
     "add_float",
+
+    # builtins
+    "builtin_min", "builtin_max"
 ]
 
 

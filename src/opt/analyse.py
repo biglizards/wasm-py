@@ -21,6 +21,7 @@ class Analyzer:
 
         self.block_starting_stacks = defaultdict(list)
         self.block_ending_stacks = defaultdict(list)
+        self.block_ending_type_maps = defaultdict(list)
 
         self.block_starting_stack_size = {}
         self.block_ending_stack_size = {}
@@ -147,9 +148,15 @@ class Analyzer:
             pop()
             pop()
             push(Bool())  # strictly, rich comparisons allow for non-bool return types
+        elif instruction.opname in ['UNARY_NEGATIVE', 'UNARY_POSITIVE']:
+            push(pop())
+        # todo this section is a bit messy -- clean it up
         elif instruction.opname in ['BINARY_SUBTRACT', 'INPLACE_SUBTRACT',
-                                    'BINARY_ADD', 'INPLACE_ADD',
-                                    'BINARY_MODULO', 'BINARY_FLOOR_DIVIDE']:
+                                    'BINARY_ADD', 'INPLACE_ADD', 'BINARY_MULTIPLY',
+                                    'BINARY_MODULO', 'BINARY_FLOOR_DIVIDE',
+                                    'BINARY_POWER', 'BINARY_RSHIFT', 'BINARY_LSHIFT',
+                                    'BINARY_OR', 'BINARY_AND',
+                                    ]:
             a = pop()
             b = pop()
             if isinstance(a, Int) and isinstance(b, Int):
@@ -242,6 +249,12 @@ class Analyzer:
         # print(f'--- END BLOCK {block.offset} {stack} ---')
         self.block_ending_stacks[block].append(stack)
 
+        # avoid blowup
+        if not stack and any(type_map == map_ for map_ in self.block_ending_type_maps[block]):
+            # we already did this, so stop
+            return
+        self.block_ending_type_maps[block].append(type_map.copy())
+
         for child in block.children:
             if child.offset <= instruction.offset:
                 continue  # if it's a backwards jump, we already covered this
@@ -249,7 +262,7 @@ class Analyzer:
 
             # assert not stack
             new_stack = stack.copy()  # it should be empty though
-            self.to_tree_subset(child, new_stack, type_map)
+            self.to_tree_subset(child, new_stack, type_map.copy())
             # we can't assert the new stack is empty, since it might be an old copy
             # indeed even looking at it here is kind of a bad idea
 
